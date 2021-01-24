@@ -70,7 +70,7 @@ async function workload(input) {
 
   const hashed = hash(data, 32).join("");
 
-  return { [basename(input)]: hashed };
+  return [basename(input), hashed] ;
 }
 
 const fs = require("fs");
