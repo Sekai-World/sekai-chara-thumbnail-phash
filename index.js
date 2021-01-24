@@ -84,4 +84,5 @@ Promise.all(
     .map((base) => workload(join(dir, base)))
 ).then((results) => {
   fs.writeFileSync("chara_hash.json", JSON.stringify(results, null, 2));
+  console.log(join(__dirname, "chara_hash.json"))
 });
