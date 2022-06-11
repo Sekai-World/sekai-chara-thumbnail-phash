@@ -70,7 +70,7 @@ async function workload(input) {
 
   const hashed = hash(data, 32).join("");
 
-  return [basename(input), hashed] ;
+  return [basename(input), hashed];
 }
 
 const fs = require("fs");
@@ -84,5 +84,5 @@ Promise.all(
     .map((base) => workload(join(dir, base)))
 ).then((results) => {
   fs.writeFileSync("chara_hash.json", JSON.stringify(results, null));
-  console.log(join(__dirname, "chara_hash.json"))
+  console.log(join(process.cwd(), "chara_hash.json"));
 });
