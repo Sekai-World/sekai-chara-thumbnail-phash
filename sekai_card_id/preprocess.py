@@ -2,10 +2,14 @@
 
 Gallery images are the raw card art (thumbnail/chara_rip). Queries are card
 crops cut out of a screenshot, i.e. art with the in-game frame and overlays
-(attribute icon, rarity stars, level, ...) drawn on top. A Layout describes
-where the art sits inside a card crop and which parts of the art are hidden
-by overlays; both sides mask those parts identically so they never
-contribute to similarity.
+(attribute icon, rarity stars, level bar, master rank badge, ...) drawn on
+top. A Layout describes where the art sits inside a card crop and which parts
+of the card are covered by overlays; both sides mask those parts identically
+so they never contribute to similarity.
+
+Overlays are placed relative to the card, so masks are given in card
+coordinates (`card_masks`) and converted to art coordinates on demand. That
+way re-calibrating `card_to_art` never requires touching the masks.
 """
 
 from __future__ import annotations
@@ -29,10 +33,11 @@ LAYOUT_DIR = Path(__file__).parent / "layouts"
 @dataclass(frozen=True)
 class Layout:
     name: str
-    card_to_art: Box
-    masks: tuple[Box, ...]
+    card_to_art: Box  # art square inside the card crop
+    card_masks: tuple[Box, ...]  # overlay regions, card-relative
     fill: tuple[int, int, int] = (128, 128, 128)
     description: str = ""
+    detector: dict | None = None  # screenshot card localisation parameters (see detect.py)
 
     @classmethod
     def load(cls, name_or_path: str | Path = "default") -> "Layout":
@@ -46,17 +51,40 @@ class Layout:
         return cls(
             name=d["name"],
             card_to_art=tuple(d["card_to_art"]),
-            masks=tuple(tuple(m) for m in d.get("masks", [])),
+            card_masks=tuple(tuple(m) for m in d.get("card_masks", [])),
             fill=tuple(d.get("fill", (128, 128, 128))),
             description=d.get("description", ""),
+            detector=d.get("detector"),
         )
 
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def replace(self, **changes) -> "Layout":
+        return Layout.from_dict({**self.to_dict(), **changes})
+
+    @property
+    def masks(self) -> tuple[Box, ...]:
+        """Overlay regions in art coordinates (clipped to the art)."""
+        al, at, ar, ab = self.card_to_art
+        aw, ah = ar - al, ab - at
+        out = []
+        for l, t, r, b in self.card_masks:
+            box = (
+                min(max((l - al) / aw, 0.0), 1.0),
+                min(max((t - at) / ah, 0.0), 1.0),
+                min(max((r - al) / aw, 0.0), 1.0),
+                min(max((b - at) / ah, 0.0), 1.0),
+            )
+            if box[2] > box[0] and box[3] > box[1]:
+                out.append(box)
+        return tuple(out)
+
     def fingerprint(self) -> str:
+        """Identifies what affects gallery content (not description / detector)."""
         d = self.to_dict()
         d.pop("description")
+        d.pop("detector")
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -141,6 +169,12 @@ def art_template_variants(
                 # Keep the box inside the image (Pillow requires it).
                 x0 = min(max(x0, 0.0), W - w2) if w2 <= W else 0.0
                 y0 = min(max(y0, 0.0), H - h2) if h2 <= H else 0.0
-                box = (x0 * k, y0 * k, min(x0 + w2, W) * k, min(y0 + h2, H) * k)
+                sw, sh = src.size
+                box = (
+                    max(0.0, x0 * k),
+                    max(0.0, y0 * k),
+                    min(float(sw), (x0 + w2) * k),  # float error can land just past the edge
+                    min(float(sh), (y0 + h2) * k),
+                )
                 out.append(np.asarray(src.resize((size, size), Image.Resampling.BOX, box=box), dtype=np.uint8))
     return np.stack(out)

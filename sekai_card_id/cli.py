@@ -128,6 +128,68 @@ def cmd_eval(args) -> int:
     return 0
 
 
+def cmd_detect(args) -> int:
+    from .detect import detect_cards
+
+    layout = Layout.load(args.layout)
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    report = []
+    for path in args.images:
+        img = load_image(path)
+        boxes = detect_cards(img, layout)
+        report.append({"image": path, "cards": [{"row": b.row, "col": b.col, "box": b.as_list()} for b in boxes]})
+        if out_dir:
+            for b in boxes:
+                b.crop(img).save(out_dir / f"{Path(path).stem}_r{b.row}c{b.col}.png")
+        print(f"{path}: {len(boxes)} cards", file=sys.stderr)
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
+
+
+def cmd_scan(args) -> int:
+    from .scan import collect, scan, write_debug
+
+    matcher = _load_matcher(args)
+    detect_layout = Layout.load(args.layout) if args.layout else None
+    shots = [load_image(p) for p in args.images]
+    sightings = scan(matcher, shots, detect_layout)
+    result = collect(sightings)
+    result["screenshots"] = [
+        {"path": p, "detected": sum(s.shot == i for s in sightings)} for i, p in enumerate(args.images)
+    ]
+    if args.debug_dir:
+        write_debug(Path(args.debug_dir), shots, args.images, sightings)
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    from .assets import find_asset
+    from .calibrate import fit_card_to_art
+    from .evaluate import labelled_queries
+
+    layout = Layout.load(args.layout)
+    entries = expand_entries(load_cards(_cards_source(args)))
+    pairs = []
+    for crop, entry in labelled_queries(Path(args.labels), entries):
+        art_path = find_asset(Path(args.asset_dir), entry.key)
+        if art_path is None:
+            print(f"  no art for {entry.key}, skipped", file=sys.stderr)
+            continue
+        pairs.append((crop, load_image(art_path, layout.fill)))
+    if not pairs:
+        print("no usable samples", file=sys.stderr)
+        return 1
+    fitted, report = fit_card_to_art(layout, pairs, log=lambda m: print(m, file=sys.stderr))
+    d = fitted.to_dict()
+    d["name"] = Path(args.out).stem
+    Path(args.out).write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=1))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="sekai-card-id", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -192,6 +254,26 @@ def main(argv=None) -> int:
     sp.add_argument("--jitter", type=float, default=0.03, help="synthetic crop misalignment (fraction of card size)")
     sp.add_argument("--out", help="write the full JSON report here")
     sp.set_defaults(func=cmd_eval)
+
+    sp = sub.add_parser("detect", help="find cards in list screenshots (no gallery needed)")
+    sp.add_argument("images", nargs="+")
+    sp.add_argument("--layout", default="default")
+    sp.add_argument("--out-dir", help="save each card crop here")
+    sp.set_defaults(func=cmd_detect)
+
+    sp = sub.add_parser("scan", help="screenshots -> owned cards")
+    query_args(sp)
+    sp.add_argument("images", nargs="+")
+    sp.add_argument("--layout", help="layout for card detection (default: the gallery's)")
+    sp.add_argument("--debug-dir", help="write annotated screenshots, crops and a pre-filled labels.csv")
+    sp.set_defaults(func=cmd_scan)
+
+    sp = sub.add_parser("calibrate", help="fit the layout's card_to_art from labelled crops")
+    data_args(sp)
+    sp.add_argument("--labels", required=True, help="CSV path,card_id[,state] of card crops")
+    sp.add_argument("--layout", default="default")
+    sp.add_argument("--out", required=True, help="where to write the fitted layout JSON")
+    sp.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)
     return args.func(args)

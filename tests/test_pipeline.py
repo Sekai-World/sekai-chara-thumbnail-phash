@@ -69,7 +69,7 @@ def test_build_is_incremental(card_assets, tmp_path):
     assert g2.entries[-1].key == new_key
 
     # Changing the layout invalidates every stored vector.
-    other = Layout.from_dict({**layout.to_dict(), "masks": []})
+    other = layout.replace(card_masks=[])
     _, s3 = build_gallery(new_entries, asset_dir, TinyEmbedder(), other, previous=g2, log=lambda *_: None)
     assert s3["embedded"] == len(new_entries)
 

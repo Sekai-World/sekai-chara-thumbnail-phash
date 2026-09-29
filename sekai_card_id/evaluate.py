@@ -36,6 +36,8 @@ def labelled_queries(csv_path: Path, entries: list[CardEntry]) -> list[tuple[Ima
     out = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            if not (row.get("card_id") or "").strip():
+                continue  # unlabelled
             state = (row.get("state") or "normal").strip()
             e = by_key.get((int(row["card_id"]), state))
             if e is None:

@@ -1,0 +1,10 @@
+{
+  "name": "legacy_156",
+  "description": "Rough geometry of the original 156px card thumbnail (8px frame, attribute icon top-left, stars / level along the bottom). Kept for reference; not calibrated.",
+  "card_to_art": [0.0513, 0.0513, 0.9487, 0.9487],
+  "card_masks": [
+    [0.0, 0.0, 0.27, 0.27],
+    [0.0, 0.75, 1.0, 1.0]
+  ],
+  "fill": [128, 128, 128]
+}
