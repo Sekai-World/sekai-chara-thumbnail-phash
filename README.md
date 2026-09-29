@@ -31,7 +31,7 @@
 ## 安装
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu   # 有 GPU 的话换成对应的源
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu   # 有 GPU 的话换成对应的源
 pip install -e ".[ml,dev]"
 ```
 
@@ -111,7 +111,7 @@ sekai-card-id calibrate --labels out/labels.csv --out my_layout.json
 ## CI
 
 - `.github/workflows/tests.yml`：运行单元测试，不需要 torch。
-- `.github/workflows/gallery.yml`：每 6 小时运行一次 `update`。素材、底库和模型都会缓存，新卡只做增量计算。之后用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注重新拟合拒识阈值，并运行 `tests/test_real_recognition.py`，准确率下降时 CI 会报错。构建好的底库（含 `reject.json`）作为 artifact 上传。手动触发时可以勾选 `full`，全部重新计算。
+- `.github/workflows/gallery.yml`：每 6 小时依次运行 `sync` 和 `build`（即 `update`）。素材、底库和模型都会缓存，新卡只做增量计算。之后用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注重新拟合拒识阈值，并运行 `tests/test_real_recognition.py`，准确率下降时 CI 会报错。构建好的底库（含 `reject.json`）作为 artifact 上传。手动触发时可以勾选 `full`，全部重新计算。
 
 本地运行真实识别测试：`SEKAI_GALLERY=data/gallery pytest tests/test_real_recognition.py`。
 
