@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sekai-card-id"
+version = "0.1.0"
+description = "Card gallery builder and zero-training retrieval baseline for recognizing Project SEKAI cards in screenshots"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Pretrained embedding backends (DINOv2 / CLIP / any timm model).
+# Install torch first from the index that matches your hardware, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+ml = [
+  "torch>=2.1",
+  "timm>=1.0",
+]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+sekai-card-id = "sekai_card_id.cli:main"
+
+[tool.setuptools]
+packages = ["sekai_card_id"]
+
+[tool.setuptools.package-data]
+sekai_card_id = ["layouts/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

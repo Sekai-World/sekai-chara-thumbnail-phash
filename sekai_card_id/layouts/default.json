@@ -1,0 +1,66 @@
+{
+  "name": "default",
+  "description": "Card list (控え室) as of 2026-09, measured on 2000x923 screenshots where a card is 130x130px. The 128px thumbnail/chara art is scaled to cover the whole card; the rarity frame (top/right/bottom, ~5px), attribute icon, stars, master rank badge and the dark 'Lv.xx' bar (spanning the card width 5px above the bottom) are drawn over it. card_to_art fitted with `calibrate` on 80 verified crops; with the frame strips masked, mean NCC vs the official art is 0.990 (0.796 with the original guess).",
+  "card_to_art": [
+    -0.002,
+    -0.0045,
+    1.003,
+    1.005
+  ],
+  "card_masks": [
+    [
+      0.0,
+      0.0,
+      0.235,
+      0.235
+    ],
+    [
+      0.0,
+      0.65,
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.04
+    ],
+    [
+      0.955,
+      0.0,
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.01,
+      1.0
+    ]
+  ],
+  "fill": [
+    128,
+    128,
+    128
+  ],
+  "detector": {
+    "type": "level_bar",
+    "bar_color": [
+      68,
+      68,
+      103
+    ],
+    "bar_tolerance": 18,
+    "bar_aspect": [
+      0.12,
+      0.23
+    ],
+    "card_width_per_bar": 1.0,
+    "card_aspect": 1.0,
+    "bottom_margin": 0.0385,
+    "clip_bg_diff": 22,
+    "clip_bg_std": 20,
+    "max_top_clip": 0.35
+  }
+}
