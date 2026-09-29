@@ -26,13 +26,22 @@ def synthetic_queries(
     return [(synth_query(load_image(find_asset(asset_dir, e.key), layout.fill), layout, rng, jitter), e) for e in picked]
 
 
-def labelled_queries(csv_path: Path, entries: list[CardEntry]) -> list[tuple[Image.Image, CardEntry]]:
-    """CSV columns: path,card_id[,state]. Paths are relative to the CSV file.
+def labelled_queries(csv_path: Path, entries: list[CardEntry], layout=None) -> list[tuple[Image.Image, CardEntry]]:
+    """Labelled card crops. Paths are relative to the CSV file. Two formats:
 
-    Each image is a crop of one card (frame included). Without `state`, only
-    card-level accuracy is meaningful.
+    - ``path,card_id[,state]``: each image is a crop of one card (frame
+      included), e.g. the labels.csv written by ``scan --debug-dir``;
+    - ``screenshot,row,col,card_id[,state]``: cards are located in the
+      screenshot with the layout's detector (needs `layout`), so a handful of
+      screenshots plus a small CSV make a test set.
+
+    Without `state`, only card-level accuracy is meaningful. Rows without a
+    card_id are skipped.
     """
+    from .detect import detect_cards
+
     by_key = {(e.card_id, e.state): e for e in entries}
+    shots: dict[str, dict] = {}
     out = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -42,7 +51,19 @@ def labelled_queries(csv_path: Path, entries: list[CardEntry]) -> list[tuple[Ima
             e = by_key.get((int(row["card_id"]), state))
             if e is None:
                 raise ValueError(f"{row}: card/state not in gallery")
-            out.append((load_image(csv_path.parent / row["path"]), e))
+            if row.get("screenshot"):
+                name = row["screenshot"]
+                if name not in shots:
+                    if layout is None:
+                        raise ValueError("screenshot labels need a layout to detect cards")
+                    img = load_image(csv_path.parent / name)
+                    shots[name] = {"img": img, "boxes": {(b.row, b.col): b for b in detect_cards(img, layout)}}
+                box = shots[name]["boxes"].get((int(row["row"]), int(row["col"])))
+                if box is None:
+                    raise ValueError(f"{row}: no card detected at that position")
+                out.append((box.crop(shots[name]["img"]), e))
+            else:
+                out.append((load_image(csv_path.parent / row["path"]), e))
     return out
 
 
@@ -140,6 +161,17 @@ def fit_reject(matcher: Matcher, queries, target_error: float = 0.01, batch_size
     if best is None:
         raise ValueError("no thresholds meet the target error")
     good, errors, s, m = best
+    # Any score threshold up to the lowest correctly accepted score keeps the
+    # same correct acceptances. Raise it to the middle of the gap below that
+    # score: a second, independent guard (often the margin alone separated
+    # the fitting data) with headroom on both sides.
+    acc_ok = (kf[:, 1] >= m) & (kf[:, 0] >= s) & correct
+    if acc_ok.any():
+        c_min = kf[acc_ok, 0].min()
+        err_scores = np.concatenate([kf[~correct, 0], uf[:, 0]])
+        below = err_scores[err_scores < c_min]
+        if below.size:
+            s = max(s, float((below.max() + c_min) / 2))
     k_acc = (kf[:, 0] >= s) & (kf[:, 1] >= m)
     u_acc = (uf[:, 0] >= s) & (uf[:, 1] >= m)
     return {

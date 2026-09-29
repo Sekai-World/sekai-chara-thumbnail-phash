@@ -118,7 +118,7 @@ def cmd_eval(args) -> int:
     matcher = _load_matcher(args)
     entries = matcher.gallery.entries
     if args.labels:
-        queries = labelled_queries(Path(args.labels), entries)
+        queries = labelled_queries(Path(args.labels), entries, matcher.layout)
         source = f"labels:{args.labels}"
     else:
         queries = synthetic_queries(entries, Path(args.asset_dir), matcher.layout, args.samples, args.seed, args.jitter)
@@ -202,7 +202,7 @@ def cmd_calibrate(args) -> int:
     layout = Layout.load(args.layout)
     entries = expand_entries(load_cards(_cards_source(args)))
     pairs = []
-    for crop, entry in labelled_queries(Path(args.labels), entries):
+    for crop, entry in labelled_queries(Path(args.labels), entries, layout):
         art_path = find_asset(Path(args.asset_dir), entry.key)
         if art_path is None:
             print(f"  no art for {entry.key}, skipped", file=sys.stderr)

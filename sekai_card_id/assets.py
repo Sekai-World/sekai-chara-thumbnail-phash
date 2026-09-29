@@ -1,4 +1,4 @@
-"""Download card thumbnail art (thumbnail/chara_rip) into a local cache directory."""
+"""Download card thumbnail art (thumbnail/chara) into a local cache directory."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .net import FetchError, fetch_bytes
 
 # Placeholders: {bundle} {state} {ext}. Point this at whichever asset mirror you use.
 DEFAULT_ASSET_URL = (
-    "https://storage.sekai.best/sekai-jp-assets/thumbnail/chara_rip/{bundle}_{state}.{ext}"
+    "https://storage.sekai.best/sekai-jp-assets/thumbnail/chara/{bundle}_{state}.{ext}"
 )
 DEFAULT_EXTS = ("webp", "png")
 IMAGE_EXTS = ("webp", "png", "jpg", "jpeg")

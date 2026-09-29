@@ -1,6 +1,6 @@
 """Geometry shared by gallery building and querying.
 
-Gallery images are the raw card art (thumbnail/chara_rip). Queries are card
+Gallery images are the raw card art (thumbnail/chara). Queries are card
 crops cut out of a screenshot, i.e. art with the in-game frame and overlays
 (attribute icon, rarity stars, level bar, master rank badge, ...) drawn on
 top. A Layout describes where the art sits inside a card crop and which parts
@@ -23,7 +23,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 # Bump when preprocessing changes in a way that invalidates stored gallery vectors.
-PREPROCESS_VERSION = 1
+PREPROCESS_VERSION = 2
 
 Box = tuple[float, float, float, float]  # relative (left, top, right, bottom)
 
@@ -118,7 +118,10 @@ def apply_masks(art: Image.Image, layout: Layout) -> Image.Image:
     draw = ImageDraw.Draw(out)
     for box in layout.masks:
         l, t, r, b = _abs_box(out.size, box)
-        draw.rectangle((l, t, r - 1, b - 1), fill=tuple(layout.fill))
+        # Cover every pixel the box touches; thin strips must not vanish or invert.
+        x0, y0, x1, y1 = int(np.floor(l)), int(np.floor(t)), int(np.ceil(r)) - 1, int(np.ceil(b)) - 1
+        if x1 >= x0 and y1 >= y0:
+            draw.rectangle((x0, y0, x1, y1), fill=tuple(layout.fill))
     return out
 
 

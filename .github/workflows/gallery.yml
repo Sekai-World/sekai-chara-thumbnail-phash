@@ -43,6 +43,12 @@ jobs:
         id: update
         continue-on-error: true
         run: sekai-card-id update ${{ inputs.full && '--full' || '' }}
+      - name: Fit reject thresholds and check accuracy on labelled real screenshots
+        if: hashFiles('data/gallery/meta.json') != ''
+        run: |
+          sekai-card-id eval --labels tests/fixtures/screenshots/labels.csv --fit-reject --out data/gallery/eval_real.json
+          pip install pytest
+          SEKAI_GALLERY=data/gallery pytest -q tests/test_real_recognition.py
       - name: Save cache
         if: always()
         uses: actions/cache/save@v4

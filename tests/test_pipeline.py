@@ -118,3 +118,12 @@ def test_filters_restrict_candidates(card_assets):
     q = synth_query(load_image(asset_dir / f"{g.entries[0].key}.png"), layout, random.Random(0))
     (res,) = matcher.match([q], top=50, filters={"rarity": ["rarity_4"]})
     assert res and all(m.entry.rarity == "rarity_4" for m in res)
+
+
+def test_thin_masks_on_tiny_images():
+    from sekai_card_id.preprocess import apply_masks
+
+    layout = Layout.load("default")
+    for size in (3, 7, 20, 64):
+        out = np.asarray(apply_masks(Image.new("RGB", (size, size), (255, 0, 0)), layout))
+        assert (out[:, 0] == layout.fill).all()  # the 1% left-edge strip still covers a column

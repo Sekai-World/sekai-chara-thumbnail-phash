@@ -1,5 +1,7 @@
 import random
 
+from PIL import Image
+
 import pytest
 
 from conftest import fake_art
@@ -154,3 +156,16 @@ def test_collect_routes_rejected_and_duplicate_sightings():
     assert [s["shot"] for s in out["cards"][0]["seen"]] == [0, 1]
     assert sorted(u["reason"] for u in out["uncertain"]) == ["duplicate_in_screenshot", "low_confidence"]
     assert out["skipped"][0]["reason"] == "clipped"
+
+
+def test_ignores_banner_in_bar_colour():
+    """A wide dark band with white text (common in UI banners) is not a level bar."""
+    from PIL import ImageDraw
+
+    layout = Layout.load("default")
+    img = Image.new("RGB", (800, 400), (230, 235, 245))
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 120, 799, 260), fill=tuple(layout.detector["bar_color"]))
+    for i in range(8):  # big white glyph blocks, as in banner titles
+        d.rectangle((60 + 85 * i, 150, 110 + 85 * i, 230), fill=(255, 255, 255))
+    assert detect_cards(img, layout) == []

@@ -98,6 +98,28 @@ def find_bars(mask: np.ndarray, min_width: int, max_gap: int, max_vgap: int = 1)
     return bars
 
 
+def _looks_like_level_bar(arr: np.ndarray, mask: np.ndarray, bar: Bar) -> bool:
+    """Structure checks that a same-coloured patch (e.g. a dark banner) fails.
+
+    A level bar is a strip: the rows just above (card art) and just below
+    (rarity frame) are not bar-coloured. And it carries the white "Lv.xx"
+    text in its left part.
+    """
+    H = mask.shape[0]
+    h = bar.height
+    pad = max(2, round(0.15 * h))
+    xs = slice(bar.x0, bar.x1)
+    above = mask[max(0, bar.y0 - pad) : bar.y0, xs]
+    below = mask[bar.y1 : min(H, bar.y1 + pad), xs]
+    if above.size and above.mean() > 0.5:
+        return False
+    if below.size and below.mean() > 0.5:
+        return False
+    text = arr[bar.y0 : bar.y1, bar.x0 + round(0.05 * bar.width) : bar.x0 + round(0.6 * bar.width)]
+    white = (text >= 190).all(axis=2).mean() if text.size else 0.0
+    return 0.05 <= white <= 0.6
+
+
 def _cluster(values: list[float], tol: float) -> list[float]:
     """1-D clustering: sorted values closer than `tol` share a centre (median)."""
     centres: list[list[float]] = []
@@ -179,12 +201,19 @@ def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
     max_gap = max(2, round(0.003 * short))
     max_vgap = max(2, round(0.02 * short))
     lo, hi = cfg.get("bar_aspect", (0.12, 0.23))
+    card_scale = cfg.get("card_width_per_bar", 1.0)
+    card_aspect = cfg.get("card_aspect", 1.0)
     bars = [
         b
         for b in find_bars(mask, min_width, max_gap, max_vgap)
         if b.width >= 0.05 * short
+        # The list is landscape with several cards per row: a card is never
+        # wider than ~30% of the screen or taller than it.
+        and b.width * card_scale <= cfg.get("max_card_width", 0.3) * W
+        and b.width * card_scale * card_aspect <= H
         and lo <= b.height / b.width <= hi
         and b.area >= 0.4 * b.width * b.height
+        and _looks_like_level_bar(arr, mask, b)
     ]
     if not bars:
         return []
