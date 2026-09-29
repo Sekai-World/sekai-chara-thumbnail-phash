@@ -28,7 +28,9 @@ jobs:
           cache: pip
       - name: Install
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # torchvision (pulled in by timm) must come from the same CPU index as
+          # torch; the PyPI wheel is built against a different torch and fails to load.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[ml]"
       - name: Restore assets, gallery and model cache
         uses: actions/cache/restore@v4
@@ -39,10 +41,13 @@ jobs:
             ~/.cache/huggingface
           key: gallery-${{ github.run_id }}
           restore-keys: gallery-
-      - name: Sync and build
-        id: update
+      # Assets that fail to download are retried next run; build what we have.
+      - name: Sync assets
+        id: sync
         continue-on-error: true
-        run: sekai-card-id update ${{ inputs.full && '--full' || '' }}
+        run: sekai-card-id sync
+      - name: Build gallery
+        run: sekai-card-id build ${{ inputs.full && '--full' || '' }}
       - name: Fit reject thresholds and check accuracy on labelled real screenshots
         if: hashFiles('data/gallery/meta.json') != ''
         run: |
@@ -64,7 +69,7 @@ jobs:
           path: data/gallery
           if-no-files-found: error
       - name: Fail if some assets could not be fetched
-        if: steps.update.outcome == 'failure'
+        if: steps.sync.outcome == 'failure'
         run: |
           cat data/assets/_sync_report.json || true
           exit 1

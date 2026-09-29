@@ -16,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 # Pretrained embedding backends (DINOv2 / CLIP / any timm model).
 # Install torch first from the index that matches your hardware, e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ml = [
   "torch>=2.1",
   "timm>=1.0",
