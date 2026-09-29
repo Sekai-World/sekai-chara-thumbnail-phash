@@ -1,0 +1,64 @@
+name: gallery
+
+# Keeps the card gallery current: new cards are downloaded and embedded,
+# everything else is reused from the cached previous gallery.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Re-embed every card (after changing model or layout)
+        type: boolean
+        default: false
+
+concurrency:
+  group: gallery
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[ml]"
+      - name: Restore assets, gallery and model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/assets
+            data/gallery
+            ~/.cache/huggingface
+          key: gallery-${{ github.run_id }}
+          restore-keys: gallery-
+      - name: Sync and build
+        id: update
+        continue-on-error: true
+        run: sekai-card-id update ${{ inputs.full && '--full' || '' }}
+      - name: Save cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/assets
+            data/gallery
+            ~/.cache/huggingface
+          key: gallery-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gallery
+          path: data/gallery
+          if-no-files-found: error
+      - name: Fail if some assets could not be fetched
+        if: steps.update.outcome == 'failure'
+        run: |
+          cat data/assets/_sync_report.json || true
+          exit 1

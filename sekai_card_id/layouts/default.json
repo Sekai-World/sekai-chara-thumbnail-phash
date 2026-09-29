@@ -1,0 +1,10 @@
+{
+  "name": "default",
+  "description": "Placeholder geometry modelled on the classic 156px card thumbnail (8px frame, attribute icon top-left, rarity stars / level along the bottom). Calibrate card_to_art and masks against real screenshots of the current card style before trusting accuracy numbers.",
+  "card_to_art": [0.0513, 0.0513, 0.9487, 0.9487],
+  "masks": [
+    [0.0, 0.0, 0.24, 0.24],
+    [0.0, 0.78, 1.0, 1.0]
+  ],
+  "fill": [128, 128, 128]
+}
