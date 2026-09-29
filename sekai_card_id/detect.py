@@ -7,6 +7,12 @@ the result with the grid (all cards share one size).
 
 Cards whose bar is scrolled out of view are not reported; they show up in
 the next screenshot, and duplicates across screenshots are merged by card id.
+
+A card at the top of the scroll view can have its bar visible while its upper
+part is already scrolled under the panel edge. Clipped rows show the panel
+background, which continues smoothly from the gutters beside the card, so we
+measure `clip_top` by walking down the card while its rows look like that
+background.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ class CardBox:
     y1: float
     row: int = 0
     col: int = 0
+    clip_top: float = 0.0  # fraction of the card height hidden at the top
 
     def crop(self, img: Image.Image) -> Image.Image:
         return img.crop((round(self.x0), round(self.y0), round(self.x1), round(self.y1)))
@@ -102,6 +109,62 @@ def _cluster(values: list[float], tol: float) -> list[float]:
     return [float(np.median(c)) for c in centres]
 
 
+def measure_top_clip(arr: np.ndarray, box: CardBox, cfg: dict) -> float:
+    """Fraction of `box` (from its top) that shows panel background instead of card.
+
+    A row counts as background when it is close to the median colour of the
+    gutters on either side of the card and has little texture. The first
+    card row is the rarity frame, which is neither, so unclipped cards measure 0.
+    """
+    H, W = arr.shape[:2]
+    x0, x1 = round(box.x0), round(box.x1)
+    h = box.y1 - box.y0
+    g = max(3, round(0.1 * (x1 - x0)))
+    max_diff = cfg.get("clip_bg_diff", 22)
+    max_std = cfg.get("clip_bg_std", 20)
+    top = round(box.y0)
+    y = max(top, 0)
+    visible_run = 0
+    first_visible = None
+    while y < min(round(box.y0 + 0.9 * h), H):
+        row = arr[y, max(x0 + 2, 0) : min(x1 - 2, W)]
+        gutter = np.concatenate([arr[y, max(0, x0 - g) : max(0, x0 - 2)], arr[y, min(W, x1 + 2) : min(W, x1 + g)]])
+        if len(gutter) == 0 or len(row) == 0:
+            break
+        diff = np.abs(row - np.median(gutter, axis=0)).mean()
+        std = row.std(axis=0).mean()
+        if diff < max_diff and std < max_std:
+            visible_run, first_visible = 0, None
+        else:
+            first_visible = y if first_visible is None else first_visible
+            visible_run += 1
+            if visible_run >= 3:
+                break
+        y += 1
+    start = first_visible if first_visible is not None else y
+    return float(min(max(start - box.y0, 0.0) / h, 1.0))
+
+
+def _on_grid(values: list[float], card_size: float) -> list[bool]:
+    """Which cluster centres sit on the lattice spanned by the well-supported ones.
+
+    A partly faded or overlapped bar can survive the shape filters and open
+    a spurious column/row between real ones; real cards sit a whole number of
+    pitches apart.
+    """
+    centres = _cluster(values, 0.3 * card_size)
+    counts = [sum(abs(v - c) <= 0.3 * card_size for v in values) for c in centres]
+    strong = [c for c, n in zip(centres, counts) if n >= max(2, 0.5 * max(counts))]
+    gaps = [b - a for a, b in zip(strong, strong[1:]) if b - a >= 0.9 * card_size]
+    if not gaps:
+        return [True] * len(values)
+    pitch = min(gaps)  # neighbouring strong columns may skip an empty one
+    pitch = float(np.median([g / round(g / pitch) for g in gaps]))
+    anchor = strong[int(np.argmax([n for c, n in zip(centres, counts) if c in strong]))]
+    ok_centres = [abs((c - anchor) / pitch - round((c - anchor) / pitch)) <= 0.08 for c in centres]
+    return [ok_centres[int(np.argmin([abs(v - c) for c in centres]))] for v in values]
+
+
 def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
     cfg = layout.detector
     if not cfg or cfg.get("type") != "level_bar":
@@ -135,6 +198,9 @@ def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
     card_w = ref * cfg.get("card_width_per_bar", 1.0)
     card_h = card_w * cfg.get("card_aspect", 1.0)
     margin = card_w * cfg.get("bottom_margin", 0.0)
+    on_cols = _on_grid([b.x0 for b in bars], card_w)
+    on_rows = _on_grid([b.y1 for b in bars], card_h)
+    bars = [b for b, c, r in zip(bars, on_cols, on_rows) if c and r]
     rows = _cluster([b.y1 for b in bars], 0.3 * card_h)
     cols = _cluster([b.x0 for b in bars], 0.3 * card_w)
 
@@ -145,7 +211,11 @@ def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
         x0 = cols[c]
         y1 = rows[r] + margin
         box = CardBox(x0, y1 - card_h, x0 + card_w, y1, r, c)
-        if box.x0 >= -1 and box.y0 >= -1 and box.x1 <= W + 1 and box.y1 <= H + 1:
+        # The top may run off the image (scrolled away); the sides may not.
+        if box.x0 >= -1 and box.x1 <= W + 1 and box.y1 <= H + 1:
             boxes.append(box)
+    arr_f = arr.astype(np.float32)
+    for box in boxes:
+        box.clip_top = measure_top_clip(arr_f, box, cfg)
     boxes.sort(key=lambda bx: (bx.row, bx.col))
     return boxes

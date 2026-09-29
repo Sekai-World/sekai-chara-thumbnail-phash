@@ -66,7 +66,14 @@ def _load_matcher(args):
 
     gallery = Gallery.load(Path(args.gallery))
     embedder = make_embedder(gallery.meta["embedder"], weights=args.weights, device=args.device)
-    return Matcher(gallery, embedder, top_k=args.top_k, rerank_weight=args.rerank_weight)
+    reject = None
+    if args.min_score is not None or args.min_margin is not None:
+        base = gallery.reject or {"min_score": -1.0, "min_margin": 0.0}
+        reject = {
+            "min_score": base["min_score"] if args.min_score is None else args.min_score,
+            "min_margin": base["min_margin"] if args.min_margin is None else args.min_margin,
+        }
+    return Matcher(gallery, embedder, top_k=args.top_k, rerank_weight=args.rerank_weight, reject=reject)
 
 
 def _parse_filters(items: list[str]) -> dict:
@@ -93,6 +100,8 @@ def cmd_match(args) -> int:
                     "score": round(m.score, 4),
                     "cos": round(m.cos, 4),
                     "ncc": None if m.ncc is None else round(m.ncc, 4),
+                    "margin": round(m.margin, 4) if m.margin != float("inf") else None,
+                    "accepted": m.accepted,
                 }
                 for m in res
             ],
@@ -104,7 +113,7 @@ def cmd_match(args) -> int:
 
 
 def cmd_eval(args) -> int:
-    from .evaluate import evaluate, labelled_queries, synthetic_queries
+    from .evaluate import evaluate, fit_reject, labelled_queries, synthetic_queries
 
     matcher = _load_matcher(args)
     entries = matcher.gallery.entries
@@ -114,7 +123,14 @@ def cmd_eval(args) -> int:
     else:
         queries = synthetic_queries(entries, Path(args.asset_dir), matcher.layout, args.samples, args.seed, args.jitter)
         source = f"synthetic(n={len(queries)}, seed={args.seed}, jitter={args.jitter})"
+    fitted = None
+    if args.fit_reject:
+        fitted = fit_reject(matcher, queries, target_error=args.target_error)
+        matcher.gallery.save_reject(Path(args.gallery), {**fitted, "fitted_on": source})
+        matcher.reject = matcher.gallery.reject
     report = {"source": source, "gallery": matcher.gallery.meta["fingerprint"], **evaluate(matcher, queries)}
+    if fitted:
+        report["reject_fit"] = fitted
     text = json.dumps(report, ensure_ascii=False, indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
@@ -125,6 +141,12 @@ def cmd_eval(args) -> int:
             f"(same character: {run['errors_same_character']})"
         )
     print(f"embed {report['embed_ms_per_query']} ms/query, {report['queries']} queries ({source})")
+    if fitted:
+        print(
+            f"reject thresholds -> {args.gallery}/reject.json: min_score={fitted['min_score']} "
+            f"min_margin={fitted['min_margin']}; known accepted {fitted['known_accepted']:.3f} "
+            f"(wrong {fitted['known_accepted_wrong']:.3f}), unknown accepted {fitted['unknown_accepted']:.3f}"
+        )
     return 0
 
 
@@ -139,7 +161,12 @@ def cmd_detect(args) -> int:
     for path in args.images:
         img = load_image(path)
         boxes = detect_cards(img, layout)
-        report.append({"image": path, "cards": [{"row": b.row, "col": b.col, "box": b.as_list()} for b in boxes]})
+        report.append(
+            {
+                "image": path,
+                "cards": [{"row": b.row, "col": b.col, "box": b.as_list(), "clip_top": round(b.clip_top, 3)} for b in boxes],
+            }
+        )
         if out_dir:
             for b in boxes:
                 b.crop(img).save(out_dir / f"{Path(path).stem}_r{b.row}c{b.col}.png")
@@ -153,6 +180,8 @@ def cmd_scan(args) -> int:
 
     matcher = _load_matcher(args)
     detect_layout = Layout.load(args.layout) if args.layout else None
+    if not matcher.reject:
+        print("warning: no reject thresholds for this gallery; run `eval --fit-reject` first", file=sys.stderr)
     shots = [load_image(p) for p in args.images]
     sightings = scan(matcher, shots, detect_layout)
     result = collect(sightings)
@@ -221,6 +250,8 @@ def main(argv=None) -> int:
         sp.add_argument("--device")
         sp.add_argument("--top-k", type=int, default=20, help="embedding candidates passed to re-ranking")
         sp.add_argument("--rerank-weight", type=float, default=0.5)
+        sp.add_argument("--min-score", type=float, help="override the gallery's fitted reject threshold")
+        sp.add_argument("--min-margin", type=float, help="override the gallery's fitted reject threshold")
 
     sp = sub.add_parser("sync", help="download master data and card art")
     data_args(sp)
@@ -253,6 +284,8 @@ def main(argv=None) -> int:
     sp.add_argument("--seed", type=int, default=0)
     sp.add_argument("--jitter", type=float, default=0.03, help="synthetic crop misalignment (fraction of card size)")
     sp.add_argument("--out", help="write the full JSON report here")
+    sp.add_argument("--fit-reject", action="store_true", help="fit accept thresholds and store them in the gallery")
+    sp.add_argument("--target-error", type=float, default=0.01, help="max share of wrong/unknown acceptances")
     sp.set_defaults(func=cmd_eval)
 
     sp = sub.add_parser("detect", help="find cards in list screenshots (no gallery needed)")

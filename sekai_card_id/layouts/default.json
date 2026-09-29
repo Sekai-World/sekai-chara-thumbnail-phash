@@ -1,19 +1,48 @@
 {
   "name": "default",
   "description": "Card list (控え室) as of 2026-09, measured on 2000x923 screenshots where a card is 130x130px: art flush with the left edge, ~5px rarity frame top/right/bottom, attribute icon top-left, stars + master rank badge over the lower art, dark 'Lv.xx' bar spanning the card width 5px above the bottom. card_to_art assumes the square art continues under the bar; refine it with `sekai-card-id calibrate`.",
-  "card_to_art": [0.008, 0.038, 0.954, 0.985],
-  "card_masks": [
-    [0.0, 0.0, 0.235, 0.235],
-    [0.0, 0.65, 1.0, 1.0]
+  "card_to_art": [
+    0.008,
+    0.038,
+    0.954,
+    0.985
   ],
-  "fill": [128, 128, 128],
+  "card_masks": [
+    [
+      0.0,
+      0.0,
+      0.235,
+      0.235
+    ],
+    [
+      0.0,
+      0.65,
+      1.0,
+      1.0
+    ]
+  ],
+  "fill": [
+    128,
+    128,
+    128
+  ],
   "detector": {
     "type": "level_bar",
-    "bar_color": [68, 68, 103],
+    "bar_color": [
+      68,
+      68,
+      103
+    ],
     "bar_tolerance": 18,
-    "bar_aspect": [0.12, 0.23],
+    "bar_aspect": [
+      0.12,
+      0.23
+    ],
     "card_width_per_bar": 1.0,
     "card_aspect": 1.0,
-    "bottom_margin": 0.0385
+    "bottom_margin": 0.0385,
+    "clip_bg_diff": 22,
+    "clip_bg_std": 20,
+    "max_top_clip": 0.35
   }
 }

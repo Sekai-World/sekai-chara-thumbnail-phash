@@ -107,3 +107,38 @@ def render_screenshot(
         bg.paste(card, (x, y))  # cards past the bottom edge are pasted clipped
         boxes.append((x, y, x + card.size[0], y + card.size[1]))
     return _jpeg(bg, 85), boxes
+
+
+def occlude_top(
+    img: Image.Image, y_clip: int, card_boxes: list[tuple[int, int, int, int]], fade: int = 12
+) -> Image.Image:
+    """Simulate the scroll view hiding everything above `y_clip`.
+
+    Inside each card's columns, rows above the clip line are replaced by
+    background interpolated from the pixels beside the cards on the same row,
+    with a linear fade into the card over `fade` rows (as the game does).
+    """
+    import numpy as np
+
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32).copy()
+    H, W = arr.shape[:2]
+    margin = 3  # keep antialiased frame pixels out of the background sample
+    covered = np.zeros(W, dtype=bool)
+    sample = np.ones(W, dtype=bool)
+    for x0, _, x1, _ in card_boxes:
+        covered[max(0, x0) : min(W, x1)] = True
+        sample[max(0, x0 - margin) : min(W, x1 + margin)] = False
+    xs = np.arange(W)
+    free = xs[sample]
+    rows = min(H, y_clip + fade)
+    bg = np.stack(
+        [np.stack([np.interp(xs, free, arr[y, free, c]) for c in range(3)], axis=1) for y in range(rows)]
+    )
+    # The real background is a blurred picture: smooth the estimate vertically too.
+    k = 9
+    padded = np.concatenate([bg[:1].repeat(k // 2, 0), bg, bg[-1:].repeat(k // 2, 0)])
+    bg = np.stack([padded[i : i + k].mean(axis=0) for i in range(rows)])
+    for y in range(rows):
+        alpha = 1.0 if y < y_clip else 1.0 - (y - y_clip + 1) / (fade + 1)
+        arr[y, covered] = alpha * bg[y, covered] + (1 - alpha) * arr[y, covered]
+    return Image.fromarray(arr.round().clip(0, 255).astype(np.uint8))

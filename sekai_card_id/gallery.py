@@ -5,6 +5,7 @@ Stored as a directory:
   entries.json     CardEntry dicts (+ asset sha256) in row order
   embeddings.npy   float16 (N, D), L2-normalised
   templates.npy    uint8 (N, S, S, 3) masked art thumbnails for re-ranking
+  reject.json      optional accept thresholds (from `eval --fit-reject`)
 
 Building is incremental: rows whose asset bytes and fingerprint are unchanged
 are copied from the previous gallery, so adding new cards only embeds the new
@@ -27,6 +28,7 @@ from .masterdata import CardEntry
 from .preprocess import PREPROCESS_VERSION, Layout, apply_masks, load_image, make_template
 
 DEFAULT_TEMPLATE_SIZE = 32
+REJECT_FILE = "reject.json"
 
 
 @dataclass
@@ -36,6 +38,7 @@ class Gallery:
     hashes: list[str]
     embeddings: np.ndarray  # float32 (N, D)
     templates: np.ndarray  # uint8 (N, S, S, 3)
+    reject: dict | None = None  # accept thresholds fitted for this gallery (reject.json)
 
     @property
     def layout(self) -> Layout:
@@ -59,7 +62,19 @@ class Gallery:
         tpl = np.load(out_dir / "templates.npy")
         if not (len(rows) == len(emb) == len(tpl) == meta["count"]):
             raise ValueError(f"{out_dir}: gallery files are inconsistent")
-        return cls(meta, [CardEntry.from_dict(r) for r in rows], [r["sha256"] for r in rows], emb, tpl)
+        reject = None
+        reject_path = out_dir / REJECT_FILE
+        if reject_path.is_file():
+            data = json.loads(reject_path.read_text(encoding="utf-8"))
+            # Thresholds are only meaningful for the model/layout they were fitted on.
+            if data.get("fingerprint") == meta["fingerprint"]:
+                reject = data
+        return cls(meta, [CardEntry.from_dict(r) for r in rows], [r["sha256"] for r in rows], emb, tpl, reject)
+
+    def save_reject(self, out_dir: Path, thresholds: dict) -> None:
+        data = {"fingerprint": self.meta["fingerprint"], **thresholds}
+        (out_dir / REJECT_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        self.reject = data
 
 
 def fingerprint(embedder: Embedder, layout: Layout, template_size: int) -> str:

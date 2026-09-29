@@ -66,9 +66,12 @@ def evaluate(matcher: Matcher, queries, rerank_weights=(0.0, None), batch_size: 
         t0 = time.time()
         results = matcher.match(cards, top=5, query_vecs=vecs, rerank_weight=weight)
         rank_s = time.time() - t0
-        top1 = top5 = card1 = same_char_err = 0
+        top1 = top5 = card1 = same_char_err = acc = acc_ok = 0
         errors = []
         for res, e in zip(results, truth):
+            if res and res[0].accepted:
+                acc += 1
+                acc_ok += res[0].entry.card_id == e.card_id
             keys = [m.entry.key for m in res]
             top1 += bool(keys) and keys[0] == e.key
             top5 += e.key in keys
@@ -86,7 +89,67 @@ def evaluate(matcher: Matcher, queries, rerank_weights=(0.0, None), batch_size: 
                 "errors": len(errors),
                 "errors_same_character": same_char_err,
                 "rank_ms_per_query": round(1000 * rank_s / n, 1),
+                **(
+                    {"accepted": round(acc / n, 4), "accepted_precision": round(acc_ok / max(1, acc), 4)}
+                    if matcher.reject
+                    else {}
+                ),
                 "error_samples": errors[:20],
             }
         )
     return report
+
+
+def fit_reject(matcher: Matcher, queries, target_error: float = 0.01, batch_size: int = 64) -> dict:
+    """Pick (min_score, min_margin) for accepting a best match.
+
+    Every query is matched twice: normally ("known"), and with its true card
+    removed from the gallery ("unknown", i.e. a card we do not have yet).
+    An error is accepting an unknown query or accepting a wrong card; we
+    maximise correctly accepted known queries while keeping errors at or
+    below `target_error` of all trials.
+    """
+    cards = [q for q, _ in queries]
+    truth = [e for _, e in queries]
+    vecs = np.concatenate([matcher.embed_cards(cards[i : i + batch_size]) for i in range(0, len(cards), batch_size)])
+    known = matcher.match(cards, top=1, query_vecs=vecs)
+    unknown = matcher.match(cards, top=1, query_vecs=vecs, exclude_card_ids=[{e.card_id} for e in truth])
+
+    def feats(results):
+        rows = [(r[0].score, min(r[0].margin, 1.0)) if r else (-1.0, 0.0) for r in results]
+        return np.array(rows, dtype=np.float64).reshape(-1, 2)
+
+    kf, uf = feats(known), feats(unknown)
+    correct = np.array([bool(r) and r[0].entry.card_id == e.card_id for r, e in zip(known, truth)])
+    n = len(truth)
+    score_grid = np.unique(np.concatenate([[-np.inf], kf[:, 0], uf[:, 0]]))
+    margin_grid = np.unique(np.concatenate([[0.0], np.quantile(np.concatenate([kf[:, 1], uf[:, 1]]), np.linspace(0, 1, 41))]))
+    best = None
+    for m in margin_grid:
+        k_ok_m = kf[:, 1] >= m
+        u_ok_m = uf[:, 1] >= m
+        for s in score_grid:
+            k_acc = k_ok_m & (kf[:, 0] >= s)
+            errors = int((k_acc & ~correct).sum() + (u_ok_m & (uf[:, 0] >= s)).sum())
+            if errors > target_error * 2 * n:
+                continue
+            good = int((k_acc & correct).sum())
+            if best is None or good > best[0] or (good == best[0] and errors < best[1]):
+                best = (good, errors, float(s), float(m))
+            break  # higher s only accepts fewer: the first feasible s is best for this m
+    if best is None:
+        raise ValueError("no thresholds meet the target error")
+    good, errors, s, m = best
+    k_acc = (kf[:, 0] >= s) & (kf[:, 1] >= m)
+    u_acc = (uf[:, 0] >= s) & (uf[:, 1] >= m)
+    return {
+        "min_score": round(s, 4) if np.isfinite(s) else -1.0,
+        "min_margin": round(m, 4),
+        "target_error": target_error,
+        "queries": n,
+        "known_top1": round(float(correct.mean()), 4),
+        "known_accepted": round(float(k_acc.mean()), 4),
+        "known_accepted_correct": round(float((k_acc & correct).mean()), 4),
+        "known_accepted_wrong": round(float((k_acc & ~correct).mean()), 4),
+        "unknown_accepted": round(float(u_acc.mean()), 4),
+    }
