@@ -18,6 +18,7 @@ background.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 from PIL import Image
@@ -177,7 +178,7 @@ def _on_grid(values: list[float], card_size: float) -> list[bool]:
     centres = _cluster(values, 0.3 * card_size)
     counts = [sum(abs(v - c) <= 0.3 * card_size for v in values) for c in centres]
     strong = [c for c, n in zip(centres, counts) if n >= max(2, 0.5 * max(counts))]
-    gaps = [b - a for a, b in zip(strong, strong[1:]) if b - a >= 0.9 * card_size]
+    gaps = [b - a for a, b in pairwise(strong) if b - a >= 0.9 * card_size]
     if not gaps:
         return [True] * len(values)
     pitch = min(gaps)  # neighbouring strong columns may skip an empty one

@@ -55,7 +55,7 @@ class Gallery:
         (out_dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
     @classmethod
-    def load(cls, out_dir: Path) -> "Gallery":
+    def load(cls, out_dir: Path) -> Gallery:
         meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
         rows = json.loads((out_dir / "entries.json").read_text(encoding="utf-8"))
         emb = np.load(out_dir / "embeddings.npy").astype(np.float32)

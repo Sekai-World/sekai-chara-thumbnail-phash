@@ -32,7 +32,7 @@ class CardEntry:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CardEntry":
+    def from_dict(cls, d: dict) -> CardEntry:
         return cls(**{k: d[k] for k in cls.__dataclass_fields__})
 
 
