@@ -40,14 +40,14 @@ class Layout:
     detector: dict | None = None  # screenshot card localisation parameters (see detect.py)
 
     @classmethod
-    def load(cls, name_or_path: str | Path = "default") -> "Layout":
+    def load(cls, name_or_path: str | Path = "default") -> Layout:
         p = Path(name_or_path)
         if not p.is_file():
             p = LAYOUT_DIR / f"{name_or_path}.json"
         return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Layout":
+    def from_dict(cls, d: dict) -> Layout:
         return cls(
             name=d["name"],
             card_to_art=tuple(d["card_to_art"]),
@@ -60,7 +60,7 @@ class Layout:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def replace(self, **changes) -> "Layout":
+    def replace(self, **changes) -> Layout:
         return Layout.from_dict({**self.to_dict(), **changes})
 
     @property

@@ -1,8 +1,7 @@
 import random
 
-from PIL import Image
-
 import pytest
+from PIL import Image
 
 from conftest import fake_art
 from sekai_card_id.calibrate import fit_card_to_art
@@ -143,7 +142,7 @@ def test_collect_routes_rejected_and_duplicate_sightings():
         e = CardEntry(f"k{card_id}", card_id, "normal", "b", 1, "rarity_4", "cool", 0)
         return Match(e, score, score, score, margin=0.1, accepted=accepted)
 
-    box = lambda r, c: CardBox(0, 0, 10, 10, r, c)  # noqa: E731
+    box = lambda r, c: CardBox(0, 0, 10, 10, r, c)
     sightings = [
         Sighting(0, box(0, 0), [m(7, 0.9, True)]),
         Sighting(0, box(0, 1), [m(7, 0.8, True)]),  # same card twice in one shot
