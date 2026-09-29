@@ -183,13 +183,16 @@ def cmd_scan(args) -> int:
     if not matcher.reject:
         print("warning: no reject thresholds for this gallery; run `eval --fit-reject` first", file=sys.stderr)
     shots = [load_image(p) for p in args.images]
-    sightings = scan(matcher, shots, detect_layout)
-    result = collect(sightings)
+    res = scan(matcher, shots, detect_layout, min_cards=args.min_cards)
+    result = collect(res.sightings)
     result["screenshots"] = [
-        {"path": p, "detected": sum(s.shot == i for s in sightings)} for i, p in enumerate(args.images)
+        {"path": p, "detected": res.detected[i], "rejected": res.rejected.get(i)}
+        for i, p in enumerate(args.images)
     ]
+    for i, reason in res.rejected.items():
+        print(f"{args.images[i]}: rejected ({reason})", file=sys.stderr)
     if args.debug_dir:
-        write_debug(Path(args.debug_dir), shots, args.images, sightings)
+        write_debug(Path(args.debug_dir), shots, args.images, res.sightings)
     print(json.dumps(result, ensure_ascii=False, indent=1))
     return 0
 
@@ -299,6 +302,7 @@ def main(argv=None) -> int:
     sp.add_argument("images", nargs="+")
     sp.add_argument("--layout", help="layout for card detection (default: the gallery's)")
     sp.add_argument("--debug-dir", help="write annotated screenshots, crops and a pre-filled labels.csv")
+    sp.add_argument("--min-cards", type=int, help="reject screenshots with fewer cards (default: the layout's)")
     sp.set_defaults(func=cmd_scan)
 
     sp = sub.add_parser("calibrate", help="fit the layout's card_to_art from labelled crops")

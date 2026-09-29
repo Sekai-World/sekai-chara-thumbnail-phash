@@ -12,8 +12,10 @@ from __future__ import annotations
 import io
 import random
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance
 
+from .detect import load_level_text_template
 from .preprocess import Layout
 
 FRAME_COLORS = [(210, 210, 215), (120, 200, 230), (240, 200, 90), (230, 150, 200), (180, 160, 240)]
@@ -47,10 +49,15 @@ def render_card(art: Image.Image, layout: Layout, rng: random.Random, card_px: i
         bar_h = bar_w * 0.17
         by1 = card_h - cfg.get("bottom_margin", 0.0) * card_w
         draw.rectangle((0, by1 - bar_h, bar_w - 1, by1 - 1), fill=tuple(cfg["bar_color"]))
-        # "Lv.60" glyph blobs
-        for i in range(rng.randint(3, 5)):
-            gx = bar_w * (0.06 + 0.09 * i)
-            draw.rectangle((gx, by1 - bar_h * 0.8, gx + bar_w * 0.05, by1 - bar_h * 0.2), fill=(250, 250, 250))
+        # "Lv." from the detector's template, then digit blobs
+        text_h = round(bar_h * 0.6)
+        tpl = load_level_text_template(cfg.get("level_text_template", "level_text.png"))
+        glyph = Image.fromarray(np.round(tpl * 255).astype(np.uint8)).resize((2 * text_h, text_h), Image.Resampling.BILINEAR)
+        gx, gy = round(bar_w * 0.06), round(by1 - bar_h * 0.8)
+        card.paste((250, 250, 250), (gx, gy, gx + glyph.width, gy + text_h), glyph)
+        for i in range(rng.randint(1, 2)):
+            dx = gx + glyph.width + bar_w * (0.02 + 0.09 * i)
+            draw.rectangle((dx, by1 - bar_h * 0.8, dx + bar_w * 0.05, by1 - bar_h * 0.2), fill=(250, 250, 250))
     return card
 
 
