@@ -18,12 +18,14 @@ background.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import pairwise
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from .preprocess import Layout
+from .preprocess import LAYOUT_DIR, Layout
 
 
 @dataclass
@@ -70,13 +72,36 @@ def _row_runs(row: np.ndarray, max_gap: int, min_len: int) -> list[tuple[int, in
     return [(int(a), int(b)) for a, b in zip(starts, ends) if b - a >= min_len]
 
 
+def _merge_overlapping(bars: list[Bar]) -> list[Bar]:
+    """Union bars that overlap horizontally and share most of their rows."""
+    bars = sorted(bars, key=lambda b: (b.y0, b.x0))
+    merged = True
+    while merged:
+        merged = False
+        for i, a in enumerate(bars):
+            for j in range(i + 1, len(bars)):
+                b = bars[j]
+                rows = min(a.y1, b.y1) - max(a.y0, b.y0)
+                if min(a.x1, b.x1) > max(a.x0, b.x0) and rows >= 0.5 * min(a.height, b.height):
+                    a.x0, a.x1, a.y0, a.y1 = min(a.x0, b.x0), max(a.x1, b.x1), min(a.y0, b.y0), max(a.y1, b.y1)
+                    del bars[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return bars
+
+
 def find_bars(mask: np.ndarray, min_width: int, max_gap: int, max_vgap: int = 1) -> list[Bar]:
     """Group horizontal runs of `mask` over nearby rows into rectangles.
 
     Rows crossing the white "Lv.60" text (and a master rank badge) are split
     into pieces; pieces shorter than `min_width` are ignored. A bar may skip up
     to `max_vgap` rows, so its clean top and bottom rows still join when every
-    row in between is fragmented. `area` is the mask fill of the final box.
+    row in between is fragmented. Pieces that started apart (e.g. a bar whose
+    first row only shows its right end) and ended up overlapping are merged,
+    and sparsely filled rows at either end are trimmed. `area` is the mask
+    fill of the final box.
     """
     active: list[Bar] = []
     done: list[Bar] = []
@@ -93,8 +118,13 @@ def find_bars(mask: np.ndarray, min_width: int, max_gap: int, max_vgap: int = 1)
                     break
             else:
                 active.append(Bar(a, b, y, y + 1))
-    bars = done + active
+    bars = _merge_overlapping(done + active)
     for bar in bars:
+        # Bar-coloured art just above can join a bar; its rows are only sparsely filled.
+        fill = mask[bar.y0 : bar.y1, bar.x0 : bar.x1].mean(axis=1)
+        full = np.flatnonzero(fill >= 0.5)
+        if full.size:
+            bar.y0, bar.y1 = bar.y0 + int(full[0]), bar.y0 + int(full[-1]) + 1
         bar.area = int(mask[bar.y0 : bar.y1, bar.x0 : bar.x1].sum())
     return bars
 
@@ -119,6 +149,60 @@ def _looks_like_level_bar(arr: np.ndarray, mask: np.ndarray, bar: Bar) -> bool:
     text = arr[bar.y0 : bar.y1, bar.x0 + round(0.05 * bar.width) : bar.x0 + round(0.6 * bar.width)]
     white = (text >= 190).all(axis=2).mean() if text.size else 0.0
     return 0.05 <= white <= 0.6
+
+
+LEVEL_TEXT_SIZE = (40, 20)  # (w, h) of a normalised "Lv." glyph
+MIN_CLIPPED = 0.6  # narrowest share of a bar left visible by a master rank badge
+
+
+def level_text_glyph(arr: np.ndarray, bar: Bar) -> np.ndarray | None:
+    """The bar's leading text, cropped to its own height and scaled to LEVEL_TEXT_SIZE.
+
+    In the level view this is "Lv."; sorted by talent the bar shows a
+    number instead, and other screens show other text (or none).
+    """
+    h = bar.height
+    white = arr[bar.y0 : bar.y1, bar.x0 : bar.x0 + 3 * h].min(axis=2) >= 170
+    cols = np.flatnonzero(white.any(axis=0))
+    if cols.size == 0:
+        return None
+    x = cols[0]
+    rows = np.flatnonzero(white[:, x : x + round(1.2 * h)].any(axis=1))
+    text_h = rows[-1] - rows[0] + 1
+    glyph = white[rows[0] : rows[-1] + 1, x : x + 2 * text_h]
+    img = Image.fromarray(glyph.astype(np.uint8) * 255).resize(LEVEL_TEXT_SIZE, Image.Resampling.BILINEAR)
+    return np.asarray(img, dtype=np.float32) / 255
+
+
+@lru_cache
+def load_level_text_template(name: str) -> np.ndarray:
+    p = Path(name) if Path(name).is_file() else LAYOUT_DIR / name
+    return np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255
+
+
+def level_text_score(glyph: np.ndarray | None, template: np.ndarray) -> float:
+    """Normalised cross-correlation with the "Lv." template (1 = identical)."""
+    if glyph is None:
+        return -1.0
+    a, b = glyph - glyph.mean(), template - template.mean()
+    d = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    return float((a * b).sum()) / d if d else -1.0
+
+
+def _reference_width(bars: list[Bar]) -> tuple[float, list[Bar]]:
+    """Intact bar width, and the bars that share the grid's bar height.
+
+    Every level bar has the same height, badge or not, so a patch of another
+    height is not one. Among the rest, a master rank badge makes some bars
+    narrower; the intact width is the widest group of (at least two) similar
+    widths, so neither the clipped majority nor a lone stray patch sets it.
+    """
+    h = float(np.median([b.height for b in bars]))
+    bars = [b for b in bars if abs(b.height - h) <= max(2.0, 0.15 * h)]
+    ws = [b.width for b in bars]
+    support = [sum(abs(v - w) <= 0.05 * w for v in ws) for w in ws]
+    w = max((v for v, n in zip(ws, support) if n >= 2), default=max(ws))
+    return float(np.median([v for v in ws if abs(v - w) <= 0.05 * w])), bars
 
 
 def _cluster(values: list[float], tol: float) -> list[float]:
@@ -199,11 +283,14 @@ def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
 
     short = min(H, W)
     min_width = max(8, round(0.04 * short))
-    max_gap = max(2, round(0.003 * short))
+    # Bridges the white text strokes inside a bar, not the ~2.5% gutter between cards.
+    max_gap = max(2, round(0.008 * short))
     max_vgap = max(2, round(0.02 * short))
     lo, hi = cfg.get("bar_aspect", (0.12, 0.23))
     card_scale = cfg.get("card_width_per_bar", 1.0)
     card_aspect = cfg.get("card_aspect", 1.0)
+    template = load_level_text_template(cfg.get("level_text_template", "level_text.png"))
+    min_text = cfg.get("level_text_min_score", 0.5)
     bars = [
         b
         for b in find_bars(mask, min_width, max_gap, max_vgap)
@@ -212,18 +299,20 @@ def detect_cards(img: Image.Image, layout: Layout) -> list[CardBox]:
         # wider than ~30% of the screen or taller than it.
         and b.width * card_scale <= cfg.get("max_card_width", 0.3) * W
         and b.width * card_scale * card_aspect <= H
-        and lo <= b.height / b.width <= hi
+        # A master rank badge can cover the right end of the bar, leaving
+        # >= MIN_CLIPPED of its width; the height is checked against the
+        # intact width below.
+        and lo <= b.height / b.width <= hi / MIN_CLIPPED
         and b.area >= 0.4 * b.width * b.height
         and _looks_like_level_bar(arr, mask, b)
+        and level_text_score(level_text_glyph(arr, b), template) >= min_text
     ]
     if not bars:
         return []
 
-    # Every card in the grid has the same size. The largest bars are intact;
-    # narrower ones were clipped by an overlay (e.g. master rank badge).
-    widths = np.array([b.width for b in bars])
-    ref = float(np.median(widths[widths >= 0.9 * widths.max()]))
-    bars = [b for b in bars if 0.6 * ref <= b.width <= 1.1 * ref]
+    # Every card in the grid has the same size.
+    ref, bars = _reference_width(bars)
+    bars = [b for b in bars if MIN_CLIPPED * ref <= b.width <= 1.1 * ref and lo <= b.height / ref <= hi]
 
     card_w = ref * cfg.get("card_width_per_bar", 1.0)
     card_h = card_w * cfg.get("card_aspect", 1.0)

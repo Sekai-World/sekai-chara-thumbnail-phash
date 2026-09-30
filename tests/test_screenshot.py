@@ -42,6 +42,96 @@ def test_detects_grid_and_skips_clipped_row(card_px):
         assert max(abs(u - v) for u, v in zip(b.as_list(), t)) <= 2
 
 
+def _bar_rect(box, layout):
+    """Where render_card draws the level bar of a card at `box`."""
+    x0, _, x1, y1 = box
+    w = x1 - x0
+    by1 = y1 - layout.detector["bottom_margin"] * w
+    return x0, by1 - 0.17 * w, x1, by1
+
+
+def test_find_bars_joins_pieces_of_one_bar():
+    """Seen in a real shot: the first row only covers the bar's right end, the second
+    row's left run starts a separate piece, the text splits the rows below, and the
+    last row joins the left piece only. The pieces are still one bar."""
+    import numpy as np
+
+    from sekai_card_id.detect import find_bars
+
+    mask = np.zeros((30, 200), bool)
+    mask[2, 70:150] = True
+    mask[3, 0:65] = mask[3, 72:150] = True
+    mask[4:23, 75:150] = True
+    mask[4:23, 0:20] = True  # left of the text: too short to count on its own
+    mask[23, 0:100] = True
+    (bar,) = find_bars(mask, min_width=40, max_gap=2, max_vgap=22)
+    assert (bar.x0, bar.x1, bar.y0, bar.y1) == (0, 150, 2, 24)
+
+
+def test_detects_bars_clipped_by_master_rank_badge():
+    """A master rank badge over the right end of the bar leaves a squat bar that still counts."""
+    from PIL import ImageDraw
+
+    layout = Layout.load("default")
+    rng = random.Random(7)
+    img, truth = render_screenshot([fake_art(i) for i in range(15)], layout, rng, cols=5, size=(900, 560))
+    d = ImageDraw.Draw(img)
+    for box in truth[::2]:
+        x0, y0, x1, y1 = _bar_rect(box, layout)
+        d.rectangle((x0 + 0.68 * (x1 - x0), y0 - 4, x1, y1 + 2), fill=(80, 190, 200))
+    boxes = detect_cards(img, layout)
+    assert len(boxes) == 15
+    for b, t in zip(boxes, truth):
+        assert max(abs(u - v) for u, v in zip(b.as_list(), t)) <= 2
+
+
+def test_stray_wide_bar_does_not_set_card_size():
+    """One bar-like patch wider than the cards (e.g. in the header) must not scale every box."""
+    layout = Layout.load("default")
+    rng = random.Random(8)
+    img, truth = render_screenshot(
+        [fake_art(i) for i in range(15)], layout, rng, cols=5, size=(900, 600), origin=(60, 120)
+    )
+    wide = render_card(fake_art(99), layout, rng, 210)  # bar 1.6x the width of the real ones
+    img.paste(wide.crop((0, 150, 210, 210)), (600, 0))
+    boxes = detect_cards(img, layout)
+    assert len(boxes) == 15
+    for b, t in zip(boxes, truth):
+        assert max(abs(u - v) for u, v in zip(b.as_list(), t)) <= 2
+
+
+def test_ignores_bars_without_level_text():
+    """Sorted by talent (or on other screens) the bar shows other text than "Lv.": not the level view."""
+    from PIL import ImageDraw
+
+    layout = Layout.load("default")
+    rng = random.Random(9)
+    img, truth = render_screenshot([fake_art(i) for i in range(15)], layout, rng, cols=5, size=(900, 560))
+    d = ImageDraw.Draw(img)
+    for box in truth:
+        x0, y0, x1, y1 = _bar_rect(box, layout)
+        d.rectangle((x0, y0, x1 - 1, y1 - 1), fill=tuple(layout.detector["bar_color"]))
+        for i in range(5):  # five digit blobs, e.g. "35801"
+            gx = x0 + (x1 - x0) * (0.06 + 0.09 * i)
+            d.rectangle((gx, y0 + 0.2 * (y1 - y0), gx + 0.05 * (x1 - x0), y1 - 0.2 * (y1 - y0)), fill=(250, 250, 250))
+    assert detect_cards(img, layout) == []
+
+
+def test_scan_accepts_only_the_ten_column_card_list(card_assets):
+    g, asset_dir, layout = _gallery(card_assets)
+    matcher = Matcher(g, TinyEmbedder())
+    rng = random.Random(4)
+    arts = [load_image(asset_dir / f"{e.key}.png") for e in g.entries]
+    ten = {"cols": 10, "card_px": 96, "gap": 16, "size": (1300, 560)}
+    other_screen = render_screenshot(arts[:15], layout, rng, cols=5, size=(900, 560))[0]
+    full = render_screenshot((arts * 2)[:40], layout, rng, **ten)[0]
+    last_page = render_screenshot(arts[:14], layout, rng, **ten)[0]  # one full row + 4
+    res = scan(matcher, [other_screen, full, last_page])
+    assert res.rejected == {0: "not_card_list"}
+    assert res.detected == [15, 40, 14]
+    assert {s.shot for s in res.sightings} == {1, 2}
+
+
 def test_scan_recognises_screenshot_cards(card_assets):
     cards, asset_dir = card_assets
     layout = Layout.load("default")
@@ -54,7 +144,7 @@ def test_scan_recognises_screenshot_cards(card_assets):
         render_screenshot(arts[:15], layout, rng, cols=5, size=(900, 560))[0],
         render_screenshot(arts[10:], layout, rng, cols=5, size=(900, 700))[0],  # overlaps the first
     ]
-    result = collect(scan(matcher, shots))
+    result = collect(scan(matcher, shots, grid_cols=5).sightings)
     found = {c["card_id"] for c in result["cards"]}
     expected = {e.card_id for e in picked}
     assert result["detections"] == 35
@@ -92,7 +182,7 @@ def test_scan_handles_top_row_under_panel(card_assets, hidden, expect_skip):
     img, truth = render_screenshot(arts, layout, rng, cols=5, size=(900, 560))
     top = truth[0][1]
     img = occlude_top(img, round(top + hidden * (truth[0][3] - top)), truth)
-    sightings = scan(matcher, [img])
+    sightings = scan(matcher, [img], grid_cols=5).sightings
     row0 = [s for s in sightings if s.box.row == 0]
     assert len(row0) == 5 and all(abs(s.box.clip_top - hidden) < 0.08 for s in row0)
     if expect_skip:

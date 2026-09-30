@@ -14,6 +14,7 @@ from .preprocess import Layout
 from .search import Match, Matcher
 
 DEFAULT_MAX_TOP_CLIP = 0.35
+DEFAULT_GRID_COLS = 10  # the card list always has 10 columns, on phones and tablets
 CLIP_MARGIN = 0.02  # also ignore the fade just below the measured clip line
 
 
@@ -32,18 +33,45 @@ class Sighting:
         return {"shot": self.shot, "row": self.box.row, "col": self.box.col, "box": self.box.as_list()}
 
 
-def scan(matcher: Matcher, shots: list[Image.Image], detect_layout: Layout | None = None, top: int = 3) -> list[Sighting]:
+@dataclass
+class ScanResult:
+    sightings: list[Sighting]
+    rejected: dict[int, str]  # screenshot index -> reason; its cards are not matched
+    detected: list[int]  # level bars found per screenshot
+
+
+def scan(
+    matcher: Matcher,
+    shots: list[Image.Image],
+    detect_layout: Layout | None = None,
+    top: int = 3,
+    grid_cols: int | None = None,
+) -> ScanResult:
     """Detect and identify every card in every screenshot.
+
+    Only the card list in its level view is accepted: its level bars fill a
+    grid of exactly `grid_cols` columns (default: the layout's `grid_cols`;
+    0 disables the check). Anything else is another screen (team, mastery,
+    story), another sort mode, or a photo of a screen, and is rejected as a
+    whole. The number of rows does not matter, so the last page of the list
+    or a filtered list with a partial last row is fine.
 
     Cards whose top is scrolled under the panel edge are matched on their
     visible part only; past `max_top_clip` too little art is left and the
     card is skipped (it is fully visible in an adjacent screenshot).
     """
     detect_layout = detect_layout or matcher.layout
-    max_clip = (detect_layout.detector or {}).get("max_top_clip", DEFAULT_MAX_TOP_CLIP)
-    sightings = []
+    cfg = detect_layout.detector or {}
+    max_clip = cfg.get("max_top_clip", DEFAULT_MAX_TOP_CLIP)
+    if grid_cols is None:
+        grid_cols = cfg.get("grid_cols", DEFAULT_GRID_COLS)
+    sightings, rejected, detected = [], {}, []
     for i, img in enumerate(shots):
         boxes = detect_cards(img, detect_layout)
+        detected.append(len(boxes))
+        if not boxes or (grid_cols and len({b.col for b in boxes}) != grid_cols):
+            rejected[i] = "not_card_list"
+            continue
         todo = []
         for b in boxes:
             if b.clip_top > max_clip:
@@ -56,7 +84,7 @@ def scan(matcher: Matcher, shots: list[Image.Image], detect_layout: Layout | Non
         results = matcher.match([b.crop(img) for b in todo], top=top, occlusions=occlusions)
         sightings += [Sighting(i, b, r) for b, r in zip(todo, results)]
     sightings.sort(key=lambda s: (s.shot, s.box.row, s.box.col))
-    return sightings
+    return ScanResult(sightings, rejected, detected)
 
 
 def _num(x: float) -> float | None:

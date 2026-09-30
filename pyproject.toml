@@ -32,7 +32,7 @@ sekai-card-id = "sekai_card_id.cli:main"
 packages = ["sekai_card_id"]
 
 [tool.setuptools.package-data]
-sekai_card_id = ["layouts/*.json"]
+sekai_card_id = ["layouts/*.json", "layouts/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
