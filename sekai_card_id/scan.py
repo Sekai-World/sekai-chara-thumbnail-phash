@@ -14,7 +14,7 @@ from .preprocess import Layout
 from .search import Match, Matcher
 
 DEFAULT_MAX_TOP_CLIP = 0.35
-DEFAULT_MIN_CARDS = 40  # a full list screen shows at least 4 rows of 10
+DEFAULT_GRID_COLS = 10  # the card list always has 10 columns, on phones and tablets
 CLIP_MARGIN = 0.02  # also ignore the fade just below the measured clip line
 
 
@@ -45,14 +45,16 @@ def scan(
     shots: list[Image.Image],
     detect_layout: Layout | None = None,
     top: int = 3,
-    min_cards: int | None = None,
+    grid_cols: int | None = None,
 ) -> ScanResult:
     """Detect and identify every card in every screenshot.
 
-    Only the card list in its level view is accepted: a screenshot with fewer
-    than `min_cards` level bars (default: the layout's `min_cards`) is some
-    other screen, another sort mode, or a photo of a screen, and is rejected
-    as a whole.
+    Only the card list in its level view is accepted: its level bars fill a
+    grid of exactly `grid_cols` columns (default: the layout's `grid_cols`;
+    0 disables the check). Anything else is another screen (team, mastery,
+    story), another sort mode, or a photo of a screen, and is rejected as a
+    whole. The number of rows does not matter, so the last page of the list
+    or a filtered list with a partial last row is fine.
 
     Cards whose top is scrolled under the panel edge are matched on their
     visible part only; past `max_top_clip` too little art is left and the
@@ -61,13 +63,13 @@ def scan(
     detect_layout = detect_layout or matcher.layout
     cfg = detect_layout.detector or {}
     max_clip = cfg.get("max_top_clip", DEFAULT_MAX_TOP_CLIP)
-    if min_cards is None:
-        min_cards = cfg.get("min_cards", DEFAULT_MIN_CARDS)
+    if grid_cols is None:
+        grid_cols = cfg.get("grid_cols", DEFAULT_GRID_COLS)
     sightings, rejected, detected = [], {}, []
     for i, img in enumerate(shots):
         boxes = detect_cards(img, detect_layout)
         detected.append(len(boxes))
-        if len(boxes) < min_cards:
+        if not boxes or (grid_cols and len({b.col for b in boxes}) != grid_cols):
             rejected[i] = "not_card_list"
             continue
         todo = []

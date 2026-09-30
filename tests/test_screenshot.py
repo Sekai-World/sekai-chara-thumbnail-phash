@@ -117,17 +117,19 @@ def test_ignores_bars_without_level_text():
     assert detect_cards(img, layout) == []
 
 
-def test_scan_rejects_screenshots_with_too_few_cards(card_assets):
+def test_scan_accepts_only_the_ten_column_card_list(card_assets):
     g, asset_dir, layout = _gallery(card_assets)
     matcher = Matcher(g, TinyEmbedder())
     rng = random.Random(4)
     arts = [load_image(asset_dir / f"{e.key}.png") for e in g.entries]
-    few = render_screenshot(arts[:15], layout, rng, cols=5, size=(900, 560))[0]
-    full = render_screenshot((arts * 2)[:40], layout, rng, cols=10, card_px=96, gap=16, size=(1300, 560))[0]
-    res = scan(matcher, [few, full])
+    ten = {"cols": 10, "card_px": 96, "gap": 16, "size": (1300, 560)}
+    other_screen = render_screenshot(arts[:15], layout, rng, cols=5, size=(900, 560))[0]
+    full = render_screenshot((arts * 2)[:40], layout, rng, **ten)[0]
+    last_page = render_screenshot(arts[:14], layout, rng, **ten)[0]  # one full row + 4
+    res = scan(matcher, [other_screen, full, last_page])
     assert res.rejected == {0: "not_card_list"}
-    assert res.detected == [15, 40]
-    assert {s.shot for s in res.sightings} == {1}
+    assert res.detected == [15, 40, 14]
+    assert {s.shot for s in res.sightings} == {1, 2}
 
 
 def test_scan_recognises_screenshot_cards(card_assets):
@@ -142,7 +144,7 @@ def test_scan_recognises_screenshot_cards(card_assets):
         render_screenshot(arts[:15], layout, rng, cols=5, size=(900, 560))[0],
         render_screenshot(arts[10:], layout, rng, cols=5, size=(900, 700))[0],  # overlaps the first
     ]
-    result = collect(scan(matcher, shots, min_cards=0).sightings)
+    result = collect(scan(matcher, shots, grid_cols=5).sightings)
     found = {c["card_id"] for c in result["cards"]}
     expected = {e.card_id for e in picked}
     assert result["detections"] == 35
@@ -180,7 +182,7 @@ def test_scan_handles_top_row_under_panel(card_assets, hidden, expect_skip):
     img, truth = render_screenshot(arts, layout, rng, cols=5, size=(900, 560))
     top = truth[0][1]
     img = occlude_top(img, round(top + hidden * (truth[0][3] - top)), truth)
-    sightings = scan(matcher, [img], min_cards=0).sightings
+    sightings = scan(matcher, [img], grid_cols=5).sightings
     row0 = [s for s in sightings if s.box.row == 0]
     assert len(row0) == 5 and all(abs(s.box.clip_top - hidden) < 0.08 for s in row0)
     if expect_skip:

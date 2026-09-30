@@ -183,7 +183,7 @@ def cmd_scan(args) -> int:
     if not matcher.reject:
         print("warning: no reject thresholds for this gallery; run `eval --fit-reject` first", file=sys.stderr)
     shots = [load_image(p) for p in args.images]
-    res = scan(matcher, shots, detect_layout, min_cards=args.min_cards)
+    res = scan(matcher, shots, detect_layout, grid_cols=args.grid_cols)
     result = collect(res.sightings)
     result["screenshots"] = [
         {"path": p, "detected": res.detected[i], "rejected": res.rejected.get(i)}
@@ -302,7 +302,7 @@ def main(argv=None) -> int:
     sp.add_argument("images", nargs="+")
     sp.add_argument("--layout", help="layout for card detection (default: the gallery's)")
     sp.add_argument("--debug-dir", help="write annotated screenshots, crops and a pre-filled labels.csv")
-    sp.add_argument("--min-cards", type=int, help="reject screenshots with fewer cards (default: the layout's)")
+    sp.add_argument("--grid-cols", type=int, help="reject screenshots whose cards do not fill this many columns (0: off)")
     sp.set_defaults(func=cmd_scan)
 
     sp = sub.add_parser("calibrate", help="fit the layout's card_to_art from labelled crops")

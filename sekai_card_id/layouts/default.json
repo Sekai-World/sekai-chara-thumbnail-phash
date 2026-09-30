@@ -64,6 +64,6 @@
     "max_top_clip": 0.35,
     "level_text_template": "level_text.png",
     "level_text_min_score": 0.5,
-    "min_cards": 40
+    "grid_cols": 10
   }
 }
