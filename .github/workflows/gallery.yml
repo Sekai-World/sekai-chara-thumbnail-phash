@@ -141,8 +141,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$TAG" > /dev/null 2>&1; then
+            # A pre-release can never become the repository's "Latest release"
+            # (--latest=false was not honoured: the API still returned this release as latest).
             gh release create "$TAG" --target "$GITHUB_SHA" --title "Gallery (rolling)" \
-              --notes-file .github/gallery-release-notes.md --latest=false
+              --notes-file .github/gallery-release-notes.md --prerelease
           fi
           # Data first, manifest last: whoever reads the manifest finds files that match it.
           gh release upload "$TAG" --clobber dist/gallery-*.tar.gz dist/embedder-*.onnx
