@@ -39,7 +39,15 @@ def cmd_build(args) -> int:
     previous = None
     if not args.full and (gallery_dir / "meta.json").is_file():
         previous = Gallery.load(gallery_dir)
-    embedder = make_embedder(args.model, weights=args.weights, img_size=args.img_size, pool=args.pool, device=args.device)
+    embedder = make_embedder(
+        args.model,
+        weights=args.weights,
+        img_size=args.img_size,
+        pool=args.pool,
+        device=args.device,
+        threads=args.threads,
+        batch_size=args.embed_batch,
+    )
     layout = Layout.load(args.layout)
     gallery, stats = build_gallery(
         entries,
@@ -65,7 +73,13 @@ def _load_matcher(args):
     from .search import Matcher
 
     gallery = Gallery.load(Path(args.gallery))
-    embedder = make_embedder(gallery.meta["embedder"], weights=args.weights, device=args.device)
+    embedder = make_embedder(
+        gallery.meta["embedder"],
+        weights=args.weights,
+        device=args.device,
+        threads=args.threads,
+        batch_size=args.embed_batch,
+    )
     reject = None
     if args.min_score is not None or args.min_margin is not None:
         base = gallery.reject or {"min_score": -1.0, "min_margin": 0.0}
@@ -74,6 +88,66 @@ def _load_matcher(args):
             "min_margin": base["min_margin"] if args.min_margin is None else args.min_margin,
         }
     return Matcher(gallery, embedder, top_k=args.top_k, rerank_weight=args.rerank_weight, reject=reject)
+
+
+def cmd_export_onnx(args) -> int:
+    from .onnx_export import export_onnx
+
+    report = export_onnx(
+        args.out,
+        model=args.model,
+        weights=args.weights,
+        img_size=args.img_size,
+        pool=args.pool,
+        quantize=not args.fp32,
+        log=lambda m: print(m, file=sys.stderr),
+    )
+    print(json.dumps(report, indent=1))
+    return 0
+
+
+def _peak_rss_mb() -> float | None:
+    try:
+        import resource
+    except ImportError:  # Windows
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # bytes on macOS, KiB elsewhere
+
+
+def cmd_bench(args) -> int:
+    """Embedding throughput of a model on this machine (content-independent: noise images)."""
+    import time
+
+    import numpy as np
+    from PIL import Image
+
+    embedder = make_embedder(
+        args.model, weights=args.weights, device=args.device, threads=args.threads, batch_size=args.embed_batch
+    )
+    rng = np.random.default_rng(0)
+    images = [Image.fromarray(rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)) for _ in range(args.cards)]
+    embedder.embed(images[: min(8, len(images))])  # warm-up: allocations, kernel selection
+    times = []
+    for _ in range(args.repeat):
+        t0 = time.perf_counter()
+        embedder.embed(images)
+        times.append(time.perf_counter() - t0)
+    best = min(times)
+    print(
+        json.dumps(
+            {
+                "embedder": embedder.fingerprint(),
+                "cards": args.cards,
+                "threads": args.threads,
+                "embed_batch": args.embed_batch,
+                "seconds": round(best, 3),
+                "ms_per_card": round(1000 * best / args.cards, 1),
+                "peak_rss_mb": _peak_rss_mb(),
+            }
+        )
+    )
+    return 0
 
 
 def _parse_filters(items: list[str]) -> dict:
@@ -237,20 +311,26 @@ def main(argv=None) -> int:
 
     def model_args(sp):
         sp.add_argument("--gallery", default="data/gallery")
-        sp.add_argument("--model", default=DEFAULT_MODEL, help='timm model name, or "tiny" (no download)')
-        sp.add_argument("--weights", help="local weights file instead of downloading")
+        sp.add_argument(
+            "--model", default=DEFAULT_MODEL, help='timm model name, "onnx" (needs --weights model.onnx) or "tiny" (no download)'
+        )
+        sp.add_argument("--weights", help="local weights file instead of downloading; the .onnx file for --model onnx")
         sp.add_argument("--img-size", type=int, default=224)
         sp.add_argument("--pool", default="cls+avg", choices=["cls", "avg", "cls+avg"])
         sp.add_argument("--layout", default="default", help="layout name or JSON path")
         sp.add_argument("--template-size", type=int, default=DEFAULT_TEMPLATE_SIZE)
         sp.add_argument("--batch-size", type=int, default=64)
         sp.add_argument("--device")
+        sp.add_argument("--threads", type=int, help="ONNX Runtime threads (default: all cores)")
+        sp.add_argument("--embed-batch", type=int, help="images per model call: lower uses less memory (ONNX default 8)")
         sp.add_argument("--full", action="store_true", help="ignore the previous gallery and re-embed everything")
 
     def query_args(sp):
         sp.add_argument("--gallery", default="data/gallery")
-        sp.add_argument("--weights", help="local weights file, if the gallery was built with one")
+        sp.add_argument("--weights", help="local weights file (the .onnx file, for ONNX galleries)")
         sp.add_argument("--device")
+        sp.add_argument("--threads", type=int, help="ONNX Runtime threads (default: all cores)")
+        sp.add_argument("--embed-batch", type=int, help="images per model call: lower uses less memory (ONNX default 8)")
         sp.add_argument("--top-k", type=int, default=20, help="embedding candidates passed to re-ranking")
         sp.add_argument("--rerank-weight", type=float, default=0.5)
         sp.add_argument("--min-score", type=float, help="override the gallery's fitted reject threshold")
@@ -271,6 +351,25 @@ def main(argv=None) -> int:
     sync_args(sp)
     model_args(sp)
     sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("export-onnx", help="export the embedding model to ONNX for serving without torch")
+    sp.add_argument("--model", default=DEFAULT_MODEL, help="timm model name")
+    sp.add_argument("--weights", help="local weights file instead of downloading")
+    sp.add_argument("--img-size", type=int, default=224)
+    sp.add_argument("--pool", default="cls+avg", choices=["cls", "avg", "cls+avg"])
+    sp.add_argument("--out", default="data/model/embedder.onnx")
+    sp.add_argument("--fp32", action="store_true", help="do not quantise to int8")
+    sp.set_defaults(func=cmd_export_onnx)
+
+    sp = sub.add_parser("bench", help="embedding speed and memory of a model on this machine")
+    sp.add_argument("--model", default="onnx", help='"onnx" (default), "tiny" or a timm model name')
+    sp.add_argument("--weights", help="the .onnx file for --model onnx")
+    sp.add_argument("--device")
+    sp.add_argument("--threads", type=int, help="ONNX Runtime threads (default: all cores)")
+    sp.add_argument("--embed-batch", type=int, help="images per model call: lower uses less memory (ONNX default 8)")
+    sp.add_argument("--cards", type=int, default=40, help="images per timing run (a screenshot shows up to 40)")
+    sp.add_argument("--repeat", type=int, default=3)
+    sp.set_defaults(func=cmd_bench)
 
     sp = sub.add_parser("match", help="identify card crops")
     query_args(sp)

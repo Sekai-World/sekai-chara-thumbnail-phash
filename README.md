@@ -39,6 +39,8 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu  
 pip install -e ".[ml,dev]"
 ```
 
+只做识别（服务端部署）不需要 torch，见下面的 [ONNX](#onnx部署时不需要-torch)：`pip install -e ".[onnx]"`。
+
 模型权重从 Hugging Face 下载。国内网络可以设置 `HF_ENDPOINT=https://hf-mirror.com`，也可以用 `--weights` 指定本地权重文件（支持 `.pth`、`.safetensors`，以及 big_vision 的 `.npz`）。
 
 ## 用法
@@ -92,6 +94,42 @@ sekai-card-id calibrate --labels out/labels.csv --out my_layout.json
 | `reject.json` | 可选，由 `eval --fit-reject` 生成的拒识阈值 |
 
 指纹不变时，按素材的 sha256 复用向量。更换模型或 layout 后，会自动全部重新计算。
+
+## ONNX：部署时不需要 torch
+
+torch 只在建底库和导出模型时才需要。服务端只装 `onnxruntime`（`pip install -e ".[onnx]"`），加载导出的单个 `.onnx` 文件就能识别：输入尺寸、均值方差和池化方式都写在文件里。
+
+```bash
+# 导出（需要 torch、timm、onnx、onnxscript：pip install -e ".[export]"）
+# 默认把矩阵乘量化成 int8（约 24 MB）；--fp32 不量化（约 88 MB）
+sekai-card-id export-onnx --out data/model/embedder-int8.onnx
+
+# 用它建底库，之后识别时同样带上 --weights。底库和查询必须用同一个模型文件：
+# 指纹记录的是文件内容的哈希（改文件名没关系，重新导出就会变，需要重建底库）
+sekai-card-id build --model onnx --weights data/model/embedder-int8.onnx
+sekai-card-id scan shot.png --weights data/model/embedder-int8.onnx
+
+# 在目标机器上实测速度和内存（40 张 = 一张截图）
+sekai-card-id bench --weights data/model/embedder-int8.onnx --threads 4
+```
+
+Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是每次送进模型的图片数：8 最快；内存紧张就调小，4 比 8 少用约三分之一内存，只慢约 5%；16 反而更慢、更占内存。
+
+在 4 核 Xeon（带 AVX-512 VNNI）上处理 40 张卡（一张截图）：
+
+| | 每张耗时 | 峰值内存 |
+|---|---|---|
+| PyTorch fp32 | 40–47 ms | 约 0.9–1.0 GB |
+| ONNX fp32，批 8 | 41 ms | 439 MB |
+| ONNX int8，批 8 | 26–30 ms | 约 295 MB |
+| ONNX int8，批 4 | 27 ms | 约 200 MB |
+
+**注意**：这台机器的 CPU 带 VNNI 指令，对 int8 特别友好。没有 VNNI 的老 CPU（比如只有 AVX2 的 Broadwell 架构 E5-1650 v4）上，int8 的加速可能小得多，所以请用 `bench` 在目标机器上实测，必要时用 `--fp32` 导出。ONNX fp32 本身并不比 PyTorch 快，省下来的主要是内存，因为不用加载 torch。
+
+准确率（全部 2420 张底库）：
+- **fp32 ONNX 与 PyTorch 完全一致**：导出时会自动校验（余弦相似度 ≥ 0.9999），真实截图上拟合出的拒识阈值也一样，1000 张合成截图的错误数也一样。
+- **int8**：80 张真实截图 80/80。1000 张合成截图（偏移 3% / 6% / 10%）的 top1 是 0.998 / 0.985 / 0.878，PyTorch 是 0.995 / 0.987 / 0.889，在噪声范围内。只用向量、不做像素精排时，int8 比 PyTorch 低约 1 个百分点。
+- **int8 的拒识余量变薄了**：真实截图上，已知卡的最低分和未知卡的最高分之差，从 +0.090（PyTorch）降到 +0.070，仍然能分开；但 margin 单独已经分不开两类（0.106 对 0.109），所以 int8 拟合出的 `min_margin` 是 0，完全靠分数把关。要用 int8，请务必用真实标注重新拟合阈值（`eval --labels --fit-reject`）。
 
 ## Layout：卡框样式变了只需要改这里
 
