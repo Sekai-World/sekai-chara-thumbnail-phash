@@ -128,7 +128,7 @@ Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是�
 
 准确率（全部 2420 张底库）：
 - **fp32 ONNX 与 PyTorch 完全一致**：导出时会自动校验（余弦相似度 ≥ 0.9999），真实截图上拟合出的拒识阈值也一样，1000 张合成截图的错误数也一样。
-- **int8**：80 张真实截图 80/80。1000 张合成截图（偏移 3% / 6% / 10%）的 top1 是 0.998 / 0.985 / 0.878，PyTorch 是 0.995 / 0.987 / 0.889，在噪声范围内。只用向量、不做像素精排时，int8 比 PyTorch 低约 1 个百分点。
+- **int8**：80 张真实截图，加上像素精排 80/80；只用向量时是 79/80（fp32 和 PyTorch 两种情况都是 80/80）。1000 张合成截图（偏移 3% / 6% / 10%）的 top1 是 0.998 / 0.985 / 0.878，PyTorch 是 0.995 / 0.987 / 0.889，在噪声范围内。只用向量、不做像素精排时，int8 比 PyTorch 低约 1 个百分点。
 - **int8 的拒识余量变薄了**：真实截图上，已知卡的最低分和未知卡的最高分之差，从 +0.090（PyTorch）降到 +0.070，仍然能分开；但 margin 单独已经分不开两类（0.106 对 0.109），所以 int8 拟合出的 `min_margin` 是 0，完全靠分数把关。要用 int8，请务必用真实标注重新拟合阈值（`eval --labels --fit-reject`）。
 
 ## Layout：卡框样式变了只需要改这里
@@ -150,12 +150,50 @@ Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是�
 
 `legacy_156.json` 是旧版 156px 卡框的粗略估计，只作为参考保留。
 
+## 发布的底库（release）
+
+`gallery` workflow 每 6 小时检查一次，底库内容有变化（出了新卡、换了模型）才会更新 rolling release `gallery-latest`；没有变化就什么都不做。里面是：
+
+| 文件 | 内容 |
+|---|---|
+| `manifest.json` | 每个文件的 sha256 和大小、条目数、构建它的 commit、最新一张卡的上线时间 |
+| `gallery-int8.tar.gz` + `embedder-int8.onnx` | int8 量化模型（约 24 MB）和用它建的底库 |
+| `gallery-fp32.tar.gz` + `embedder-fp32.onnx` | 未量化模型（约 88 MB）和用它建的底库，结果与 PyTorch 完全一致 |
+
+**同一变体的底库和模型必须配套使用。** 选哪个变体：先用 `sekai-card-id bench` 在目标机器上分别测两个模型；int8 更快、更省内存，但在没有 VNNI 的 CPU 上收益可能很小，而且它的拒识余量更薄（见上面的 [ONNX](#onnx部署时不需要-torch)）。
+
+```bash
+base=https://github.com/Sekai-World/sekai-chara-thumbnail-phash/releases/download/gallery-latest
+v=int8   # 或 fp32
+curl -fsSLO "$base/manifest.json"
+curl -fsSLO "$base/gallery-$v.tar.gz"
+curl -fsSLO "$base/embedder-$v.onnx"
+
+# 校验（manifest 最后上传，所以读到它就能找到和它匹配的文件；校验不过说明正好撞上更新，过一会儿重试）
+jq -r ".variants.$v | \"\(.gallery.sha256)  \(.gallery.file)\n\(.model.sha256)  \(.model.file)\"" manifest.json | sha256sum -c
+
+tar xzf "gallery-$v.tar.gz"      # 解出 gallery/
+sekai-card-id scan shot.png --gallery gallery --weights "embedder-$v.onnx"
+```
+
+- 识别代码要和构建底库时的版本兼容：`manifest.json` 里的 `preprocess_version` 不一样就必须升级 `sekai-card-id`，`commit` 是构建它的代码版本。
+- 底库里已经带着 `reject.json`（拒识阈值）。阈值是在仓库里那 80 条真实标注上拟合的，样本很少，换了设备或卡框样式后建议用新的标注重新拟合。
+- 更新时每个文件是逐个替换的，所以下载到一半可能遇到 404 或和 `manifest.json` 对不上，重试即可。release 的 tag 只是个固定的地址，不会跟着移动，以 manifest 里的 `commit` 为准。
+- 模型文件缓存在 CI 里，保证底库在两次构建之间保持有效；缓存丢了会重新导出，模型和底库会一起变（手动触发时勾选 `reexport` 也一样）。
+
 ## CI
 
-- `.github/workflows/tests.yml`：运行单元测试，不需要 torch。
-- `.github/workflows/gallery.yml`：每 6 小时依次运行 `sync` 和 `build`（即 `update`）。素材、底库和模型都会缓存，新卡只做增量计算。之后用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注重新拟合拒识阈值，并运行 `tests/test_real_recognition.py`，准确率下降时 CI 会报错。构建好的底库（含 `reject.json`）作为 artifact 上传。手动触发时可以勾选 `full`，全部重新计算。
+- `.github/workflows/tests.yml`：运行单元测试，只装 `.[dev]`，不需要 torch；需要 torch 的导出测试自动跳过。
+- `.github/workflows/gallery.yml`：每 6 小时运行一次（也可以手动触发）：
+  1. 导出 int8 和 fp32 两个 ONNX 模型（缓存的话直接复用）；
+  2. `sync` 素材，用两个模型各建一个底库（增量，新卡才会重新计算）；
+  3. 用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注拟合拒识阈值，再运行 `tests/test_real_recognition.py`，准确率下降时 CI 报错；
+  4. `pack` 打包，和 release 里现有的 `manifest.json` 比较，没有变化就跳过；
+  5. 有变化且素材都下载成功时，更新 release。
 
-本地运行真实识别测试：`SEKAI_GALLERY=data/gallery pytest tests/test_real_recognition.py`。
+  手动触发时的选项：`full`（全部重新计算向量）、`reexport`（重新导出模型）、`publish`（关掉就是演练，文件只作为 workflow artifact 上传）、`tag`（发布到别的 tag，用来测试）。
+
+本地运行真实识别测试：`SEKAI_GALLERY=data/gallery-int8 SEKAI_WEIGHTS=data/model/embedder-int8.onnx pytest tests/test_real_recognition.py`（PyTorch 底库不需要 `SEKAI_WEIGHTS`）。
 
 ## 现状与局限
 

@@ -106,6 +106,38 @@ def cmd_export_onnx(args) -> int:
     return 0
 
 
+def _git_commit() -> str | None:
+    import os
+    import subprocess
+
+    if os.environ.get("GITHUB_SHA"):
+        return os.environ["GITHUB_SHA"]
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def cmd_pack(args) -> int:
+    from .release import PackError, pack
+
+    previous = None
+    if args.previous_manifest:
+        try:
+            previous = json.loads(Path(args.previous_manifest).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"ignoring previous manifest ({e}): everything counts as changed", file=sys.stderr)
+    variants = {name: (Path(gallery), Path(model)) for name, gallery, model in args.variant}
+    try:
+        result = pack(variants, Path(args.out), previous=previous, commit=args.commit or _git_commit())
+    except PackError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=1, sort_keys=True))
+    return 0
+
+
 def _peak_rss_mb() -> float | None:
     try:
         import resource
@@ -360,6 +392,20 @@ def main(argv=None) -> int:
     sp.add_argument("--out", default="data/model/embedder.onnx")
     sp.add_argument("--fp32", action="store_true", help="do not quantise to int8")
     sp.set_defaults(func=cmd_export_onnx)
+
+    sp = sub.add_parser("pack", help="package galleries + models as release assets (gallery-NAME.tar.gz, ...)")
+    sp.add_argument(
+        "--variant",
+        nargs=3,
+        action="append",
+        required=True,
+        metavar=("NAME", "GALLERY_DIR", "MODEL_ONNX"),
+        help="repeatable, e.g. --variant int8 data/gallery-int8 data/model/embedder-int8.onnx",
+    )
+    sp.add_argument("--out", default="dist")
+    sp.add_argument("--previous-manifest", help="manifest.json of what is published now; prints changed=false if identical")
+    sp.add_argument("--commit", help="commit that built the gallery (default: $GITHUB_SHA or git HEAD)")
+    sp.set_defaults(func=cmd_pack)
 
     sp = sub.add_parser("bench", help="embedding speed and memory of a model on this machine")
     sp.add_argument("--model", default="onnx", help='"onnx" (default), "tiny" or a timm model name')
