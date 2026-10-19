@@ -39,6 +39,8 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu  
 pip install -e ".[ml,dev]"
 ```
 
+只做识别（服务端部署）不需要 torch，见下面的 [ONNX](#onnx部署时不需要-torch)：`pip install -e ".[onnx]"`。
+
 模型权重从 Hugging Face 下载。国内网络可以设置 `HF_ENDPOINT=https://hf-mirror.com`，也可以用 `--weights` 指定本地权重文件（支持 `.pth`、`.safetensors`，以及 big_vision 的 `.npz`）。
 
 ## 用法
@@ -93,6 +95,42 @@ sekai-card-id calibrate --labels out/labels.csv --out my_layout.json
 
 指纹不变时，按素材的 sha256 复用向量。更换模型或 layout 后，会自动全部重新计算。
 
+## ONNX：部署时不需要 torch
+
+torch 只在建底库和导出模型时才需要。服务端只装 `onnxruntime`（`pip install -e ".[onnx]"`），加载导出的单个 `.onnx` 文件就能识别：输入尺寸、均值方差和池化方式都写在文件里。
+
+```bash
+# 导出（需要 torch、timm、onnx、onnxscript：pip install -e ".[export]"）
+# 默认把矩阵乘量化成 int8（约 24 MB）；--fp32 不量化（约 88 MB）
+sekai-card-id export-onnx --out data/model/embedder-int8.onnx
+
+# 用它建底库，之后识别时同样带上 --weights。底库和查询必须用同一个模型文件：
+# 指纹记录的是文件内容的哈希（改文件名没关系，重新导出就会变，需要重建底库）
+sekai-card-id build --model onnx --weights data/model/embedder-int8.onnx
+sekai-card-id scan shot.png --weights data/model/embedder-int8.onnx
+
+# 在目标机器上实测速度和内存（40 张 = 一张截图）
+sekai-card-id bench --weights data/model/embedder-int8.onnx --threads 4
+```
+
+Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是每次送进模型的图片数：8 最快；内存紧张就调小，4 比 8 少用约三分之一内存，只慢约 5%；16 反而更慢、更占内存。
+
+在 4 核 Xeon（带 AVX-512 VNNI）上处理 40 张卡（一张截图）：
+
+| | 每张耗时 | 峰值内存 |
+|---|---|---|
+| PyTorch fp32 | 40–47 ms | 约 0.9–1.0 GB |
+| ONNX fp32，批 8 | 41 ms | 439 MB |
+| ONNX int8，批 8 | 26–30 ms | 约 295 MB |
+| ONNX int8，批 4 | 27 ms | 约 200 MB |
+
+**注意**：这台机器的 CPU 带 VNNI 指令，对 int8 特别友好。没有 VNNI 的老 CPU（比如只有 AVX2 的 Broadwell 架构 E5-1650 v4）上，int8 的加速可能小得多，所以请用 `bench` 在目标机器上实测，必要时用 `--fp32` 导出。ONNX fp32 本身并不比 PyTorch 快，省下来的主要是内存，因为不用加载 torch。
+
+准确率（全部 2420 张底库）：
+- **fp32 ONNX 与 PyTorch 完全一致**：导出时会自动校验（余弦相似度 ≥ 0.9999），真实截图上拟合出的拒识阈值也一样，1000 张合成截图的错误数也一样。
+- **int8**：80 张真实截图，加上像素精排 80/80；只用向量时是 79/80（fp32 和 PyTorch 两种情况都是 80/80）。1000 张合成截图（偏移 3% / 6% / 10%）的 top1 是 0.998 / 0.985 / 0.878，PyTorch 是 0.995 / 0.987 / 0.889，在噪声范围内。只用向量、不做像素精排时，int8 比 PyTorch 低约 1 个百分点。
+- **int8 的拒识余量变薄了**：真实截图上，已知卡的最低分和未知卡的最高分之差，从 +0.090（PyTorch）降到 +0.070，仍然能分开；但 margin 单独已经分不开两类（0.106 对 0.109），所以 int8 拟合出的 `min_margin` 是 0，完全靠分数把关。要用 int8，请务必用真实标注重新拟合阈值（`eval --labels --fit-reject`）。
+
 ## Layout：卡框样式变了只需要改这里
 
 `sekai_card_id/layouts/default.json` 描述卡片的几何结构，全部是相对于卡片框的坐标：
@@ -112,12 +150,66 @@ sekai-card-id calibrate --labels out/labels.csv --out my_layout.json
 
 `legacy_156.json` 是旧版 156px 卡框的粗略估计，只作为参考保留。
 
+## 发布的底库（release）
+
+`gallery` workflow 每 6 小时检查一次，底库内容有变化（出了新卡、换了模型）才会更新 rolling release `gallery-latest`；没有变化就什么都不做。里面是：
+
+| 文件 | 内容 |
+|---|---|
+| `manifest.json` | 每个文件的 sha256 和大小、条目数、构建它的 commit、最新一张卡的上线时间 |
+| `gallery-int8.tar.gz` + `embedder-int8.onnx` | int8 量化模型（约 24 MB）和用它建的底库 |
+| `gallery-fp32.tar.gz` + `embedder-fp32.onnx` | 未量化模型（约 88 MB）和用它建的底库，结果与 PyTorch 完全一致 |
+
+**同一变体的底库和模型必须配套使用。** 选哪个变体：先用 `sekai-card-id bench` 在目标机器上分别测两个模型；int8 更快、更省内存，但在没有 VNNI 的 CPU 上收益可能很小，而且它的拒识余量更薄（见上面的 [ONNX](#onnx部署时不需要-torch)）。
+
+```bash
+base=https://github.com/Sekai-World/sekai-chara-thumbnail-phash/releases/download/gallery-latest
+v=int8   # 或 fp32
+curl -fsSLO "$base/manifest.json"
+curl -fsSLO "$base/gallery-$v.tar.gz"
+curl -fsSLO "$base/embedder-$v.onnx"
+
+# 校验（manifest 最后上传，所以读到它就能找到和它匹配的文件；校验不过说明正好撞上更新，过一会儿重试）
+jq -r ".variants.$v | \"\(.gallery.sha256)  \(.gallery.file)\n\(.model.sha256)  \(.model.file)\"" manifest.json | sha256sum -c
+
+tar xzf "gallery-$v.tar.gz"      # 解出 gallery/
+sekai-card-id scan shot.png --gallery gallery --weights "embedder-$v.onnx"
+```
+
+- 识别代码要和构建底库时的版本兼容：`manifest.json` 里的 `preprocess_version` 不一样就必须升级 `sekai-card-id`，`commit` 是构建它的代码版本。
+- 底库里已经带着 `reject.json`（拒识阈值）。阈值是在仓库里那 80 条真实标注上拟合的，样本很少，换了设备或卡框样式后建议用新的标注重新拟合。
+- 更新时每个文件是逐个替换的，所以下载到一半可能遇到 404 或和 `manifest.json` 对不上，重试即可。release 的 tag 只是个固定的地址，不会跟着移动，以 manifest 里的 `commit` 为准。
+- 模型文件缓存在 CI 里，保证底库在两次构建之间保持有效；缓存丢了会重新导出，模型和底库会一起变（手动触发时勾选 `reexport` 也一样）。
+
+## 所有服务器共用一份底库
+
+JP、EN、TW、KR、CN 用同一份底库，不需要按服务器另建。底库以 JP 的卡为准，它是全集。2026-10 对五个服务器的主数据（`sekai-master-db-*-diff` 的 `cards.json`）逐项比对过：
+
+| | JP | EN | TW | KR | CN |
+|---|---|---|---|---|---|
+| 卡牌数 | 1465 | 1244 | 1357 | 1351 | 1345 |
+| 不在 JP 里的卡 | — | 0 | 0 | 0 | 0 |
+| 和 JP 不一致的字段（素材名、角色、稀有度、属性、能否特训） | — | 0 | 0 | 0 | 0 |
+
+其他服务器的卡都是 JP 的子集，同一个 `card_id` 的素材名完全一样，所以识别结果里的 `card_id` 可以直接对应到任何服务器的主数据。
+
+**卡面图本身也是同一批文件**：按维护者的说明，其他服务器没有单独存卡面图，都直接用 JP 的；Sekai Viewer 的前端显示卡面缩略图时也对所有服务器写死用 JP 的素材地址（`storage.sekai.best/sekai-jp-assets/thumbnail/chara/`），其他服务器的素材桶里没有这批文件。
+
+**没有验证的**：其他服务器的卡牌列表界面（卡框、`Lv` 条、字形）是否和 JP 一样。这只能用其他服务器的真实截图确认；有的话补进 `tests/fixtures/screenshots/`，用 `eval --labels` 核对。
+
 ## CI
 
-- `.github/workflows/tests.yml`：运行单元测试，不需要 torch。
-- `.github/workflows/gallery.yml`：每 6 小时依次运行 `sync` 和 `build`（即 `update`）。素材、底库和模型都会缓存，新卡只做增量计算。之后用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注重新拟合拒识阈值，并运行 `tests/test_real_recognition.py`，准确率下降时 CI 会报错。构建好的底库（含 `reject.json`）作为 artifact 上传。手动触发时可以勾选 `full`，全部重新计算。
+- `.github/workflows/tests.yml`：运行单元测试，只装 `.[dev]`，不需要 torch；需要 torch 的导出测试自动跳过。
+- `.github/workflows/gallery.yml`：每 6 小时运行一次（也可以手动触发）：
+  1. 导出 int8 和 fp32 两个 ONNX 模型（缓存的话直接复用）；
+  2. `sync` 素材，用两个模型各建一个底库（增量，新卡才会重新计算）；
+  3. 用 `tests/fixtures/screenshots/labels.csv` 里的 80 条真实标注拟合拒识阈值，再运行 `tests/test_real_recognition.py`，准确率下降时 CI 报错；
+  4. `pack` 打包，和 release 里现有的 `manifest.json` 比较，没有变化就跳过；
+  5. 有变化且素材都下载成功时，更新 release。
 
-本地运行真实识别测试：`SEKAI_GALLERY=data/gallery pytest tests/test_real_recognition.py`。
+  手动触发时的选项：`full`（全部重新计算向量）、`reexport`（重新导出模型）、`publish`（关掉就是演练，文件只作为 workflow artifact 上传）、`tag`（发布到别的 tag，用来测试）。
+
+本地运行真实识别测试：`SEKAI_GALLERY=data/gallery-int8 SEKAI_WEIGHTS=data/model/embedder-int8.onnx pytest tests/test_real_recognition.py`（PyTorch 底库不需要 `SEKAI_WEIGHTS`）。
 
 ## 现状与局限
 
@@ -146,7 +238,8 @@ sekai-card-id calibrate --labels out/labels.csv --out my_layout.json
 
 ## 下一步
 
-1. 收集其他设备（平板、不同屏幕比例）以及滚到一半的真实截图，补充到 `tests/fixtures/screenshots/` 和 `labels.csv`。样本越多，拒识阈值越可靠。
-2. 其他服务器（EN/TW/KR/CN）：换对应的主数据和素材地址，界面相同的话卡框配置可以直接复用。
-3. 可选：识别 `Lv`、专精等级等信息，一起导入。
-4. 目前的零训练基线在真实数据上已经够用，暂时不需要微调。
+1. 在目标服务器上用 `sekai-card-id bench` 实测 int8 和 fp32，决定用哪个变体（int8 的加速在没有 VNNI 的 CPU 上没测过，见 [ONNX](#onnx部署时不需要-torch)）。
+2. 收集其他设备（平板、不同屏幕比例）、其他服务器（EN/TW/KR/CN，底库不用另建，见上，但界面是否和 JP 一样没确认过）以及滚到一半的真实截图，补充到 `tests/fixtures/screenshots/` 和 `labels.csv`。样本越多，拒识阈值越可靠；int8 的拒识余量更薄，更需要这些样本。
+3. 如果 int8 在目标机器上没有明显收益，或者想进一步提速：可以先用 tiny 特征（约 0.7 ms/张）预筛，只对把握不大的卡再跑 DINOv2。但 tiny 对定位偏差比较敏感（偏移 10% 时只有 68%），需要先有其他设备的样本再决定。
+4. 可选：识别 `Lv`、专精等级等信息，一起导入。
+5. 目前的零训练基线在真实数据上已经够用，暂时不需要微调。
