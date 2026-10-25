@@ -1,20 +1,41 @@
 name: gallery
 
-# Keeps the card gallery current: new cards are downloaded and embedded,
-# everything else is reused from the cached previous gallery.
+# Keeps the card galleries current and publishes them as a rolling release:
+# new cards are downloaded and embedded, everything else is reused from the
+# cached previous gallery, and a release is only touched when the content changed.
 on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
     inputs:
       full:
-        description: Re-embed every card (after changing model or layout)
+        description: Re-embed every card (after changing the layout)
         type: boolean
         default: false
+      reexport:
+        description: Export the ONNX models again (they are cached so that galleries stay valid; this changes both files)
+        type: boolean
+        default: false
+      publish:
+        description: Update the release (turn off for a dry run; the assets are still uploaded as a workflow artifact)
+        type: boolean
+        default: true
+      tag:
+        description: Release tag to publish to (use another tag to test)
+        type: string
+        default: gallery-latest
+
+permissions:
+  contents: write # create / update the release
 
 concurrency:
   group: gallery
   cancel-in-progress: false
+
+env:
+  # int8: ~24 MB model, faster on CPUs with VNNI; fp32: exactly the PyTorch results.
+  VARIANTS: int8 fp32
+  TAG: ${{ inputs.tag || 'gallery-latest' }}
 
 jobs:
   build:
@@ -28,46 +49,106 @@ jobs:
           cache: pip
       - name: Install
         run: |
-          # torchvision (pulled in by timm) must come from the same CPU index as
-          # torch; the PyPI wheel is built against a different torch and fails to load.
+          # torch is only needed to export the models; torchvision (pulled in by timm)
+          # must come from the same CPU index as torch, the PyPI wheel fails to load.
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[ml]"
-      - name: Restore assets, gallery and model cache
+          pip install -e ".[export,dev]"
+      - name: Restore assets, models, galleries and model cache
         uses: actions/cache/restore@v4
         with:
           path: |
             data/assets
-            data/gallery
+            data/model
+            data/gallery-int8
+            data/gallery-fp32
             ~/.cache/huggingface
-          key: gallery-${{ github.run_id }}
-          restore-keys: gallery-
+          key: gallery-onnx-${{ github.run_id }}
+          restore-keys: gallery-onnx-
+      # The models are cached on purpose: a gallery is only valid for the exact model file
+      # it was built with, and re-exporting (e.g. with newer packages) can change the bytes.
+      - name: Export ONNX models
+        env:
+          REEXPORT: ${{ inputs.reexport }}
+        run: |
+          mkdir -p data/model
+          for v in $VARIANTS; do
+            f="data/model/embedder-$v.onnx"
+            if [ -f "$f" ] && [ "$REEXPORT" != "true" ]; then
+              echo "using cached $f"
+              continue
+            fi
+            flags=""
+            if [ "$v" = fp32 ]; then flags="--fp32"; fi
+            sekai-card-id export-onnx --out "$f" $flags
+          done
       # Assets that fail to download are retried next run; build what we have.
       - name: Sync assets
         id: sync
         continue-on-error: true
         run: sekai-card-id sync
-      - name: Build gallery
-        run: sekai-card-id build ${{ inputs.full && '--full' || '' }}
-      - name: Fit reject thresholds and check accuracy on labelled real screenshots
-        if: hashFiles('data/gallery/meta.json') != ''
+      - name: Build galleries
+        env:
+          FULL: ${{ inputs.full && '--full' || '' }}
         run: |
-          sekai-card-id eval --labels tests/fixtures/screenshots/labels.csv --fit-reject --out data/gallery/eval_real.json
-          pip install pytest
-          SEKAI_GALLERY=data/gallery pytest -q tests/test_real_recognition.py
+          for v in $VARIANTS; do
+            sekai-card-id build --model onnx --weights "data/model/embedder-$v.onnx" --gallery "data/gallery-$v" $FULL
+          done
+      - name: Fit reject thresholds and check accuracy on labelled real screenshots
+        run: |
+          for v in $VARIANTS; do
+            sekai-card-id eval --gallery "data/gallery-$v" --weights "data/model/embedder-$v.onnx" \
+              --labels tests/fixtures/screenshots/labels.csv --fit-reject --out "data/gallery-$v/eval_real.json"
+            SEKAI_GALLERY="data/gallery-$v" SEKAI_WEIGHTS="data/model/embedder-$v.onnx" \
+              pytest -q tests/test_real_recognition.py
+          done
       - name: Save cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: |
             data/assets
-            data/gallery
+            data/model
+            data/gallery-int8
+            data/gallery-fp32
             ~/.cache/huggingface
-          key: gallery-${{ github.run_id }}
+          key: gallery-onnx-${{ github.run_id }}
+      - name: Package release assets
+        id: pack
+        run: |
+          args=()
+          for v in $VARIANTS; do
+            args+=(--variant "$v" "data/gallery-$v" "data/model/embedder-$v.onnx")
+          done
+          # What is published now (absent the first time): skip publishing if nothing changed.
+          if curl -fsSL -o prev-manifest.json "https://github.com/${{ github.repository }}/releases/download/$TAG/manifest.json"; then
+            args+=(--previous-manifest prev-manifest.json)
+          fi
+          sekai-card-id pack --out dist "${args[@]}" > pack.json
+          echo "changed=$(jq -r .changed pack.json)" >> "$GITHUB_OUTPUT"
+          jq '{changed, commit, newest_card_release_at, variants: (.variants | map_values({entries, content_hash}))}' pack.json
       - uses: actions/upload-artifact@v4
         with:
           name: gallery
-          path: data/gallery
+          path: dist
+          retention-days: 7
           if-no-files-found: error
+      # Only from a complete sync: a card whose art could not be fetched would silently drop out.
+      - name: Publish release
+        if: >-
+          steps.pack.outputs.changed == 'true' && steps.sync.outcome == 'success' &&
+          (github.event_name == 'schedule' || inputs.publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            # A pre-release can never become the repository's "Latest release"
+            # (--latest=false was not honoured: the API still returned this release as latest).
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "Gallery (rolling)" \
+              --notes-file .github/gallery-release-notes.md --prerelease
+          fi
+          # Data first, manifest last: whoever reads the manifest finds files that match it.
+          gh release upload "$TAG" --clobber dist/gallery-*.tar.gz dist/embedder-*.onnx
+          gh release upload "$TAG" --clobber dist/manifest.json
       - name: Fail if some assets could not be fetched
         if: steps.sync.outcome == 'failure'
         run: |

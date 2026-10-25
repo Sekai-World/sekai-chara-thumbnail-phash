@@ -21,8 +21,22 @@ ml = [
   "torch>=2.1",
   "timm>=1.0",
 ]
+# Serving with an exported model: no torch needed.
+onnx = [
+  "onnxruntime>=1.17",
+]
+# Writing that model (`sekai-card-id export-onnx`). Install torch/torchvision first as above.
+export = [
+  "torch>=2.5",
+  "timm>=1.0",
+  "onnx>=1.16",
+  "onnxscript>=0.1",
+  "onnxruntime>=1.17",
+]
 dev = [
   "pytest>=8",
+  "onnx>=1.16",
+  "onnxruntime>=1.17",
 ]
 
 [project.scripts]
