@@ -124,7 +124,20 @@ Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是�
 | ONNX int8，批 8 | 26–30 ms | 约 295 MB |
 | ONNX int8，批 4 | 27 ms | 约 200 MB |
 
-**注意**：这台机器的 CPU 带 VNNI 指令，对 int8 特别友好。没有 VNNI 的老 CPU（比如只有 AVX2 的 Broadwell 架构 E5-1650 v4）上，int8 的加速可能小得多，所以请用 `bench` 在目标机器上实测，必要时用 `--fp32` 导出。ONNX fp32 本身并不比 PyTorch 快，省下来的主要是内存，因为不用加载 torch。
+**注意**：这台机器的 CPU 带 VNNI 指令，对 int8 特别友好。没有 VNNI 的老 CPU 上，int8 的加速小得多，所以请用 `bench` 在目标机器上实测，必要时用 `--fp32` 导出。ONNX fp32 本身并不比 PyTorch 快，省下来的主要是内存，因为不用加载 torch。
+
+在只有 AVX2 的 Broadwell 架构 E5-1650 v4（6 核 12 线程，没有 VNNI）上实测（`gallery-latest` 发布的两个模型，onnxruntime 1.31.1，机器同时跑着其他负载，两轮结果相差不到 1 ms）：
+
+| | 4 线程 | 6 线程 | 12 线程 | 峰值内存 |
+|---|---|---|---|---|
+| ONNX fp32，批 8 | 48.9 ms | 37–39 ms | 49.8 ms | 约 430 MB |
+| ONNX fp32，批 4 | | 37–38 ms | | 约 310 MB |
+| ONNX int8，批 8 | 45.8 ms | 34 ms | 40.0 ms | 约 300 MB |
+| ONNX int8，批 4 | | 34 ms | | 约 200 MB |
+
+- int8 只比 fp32 快约 9%（VNNI 机器上约 30%），省内存的效果不变（少约 30%）。int8 的拒识余量更薄，在这类机器上可以考虑直接用 fp32。
+- 线程数设成物理核数（这里是 6）最快；把超线程也算上（12）反而更慢。
+- 这台机器上批 4 和批 8 一样快，内存却少约 100 MB。
 
 准确率（全部 2420 张底库）：
 - **fp32 ONNX 与 PyTorch 完全一致**：导出时会自动校验（余弦相似度 ≥ 0.9999），真实截图上拟合出的拒识阈值也一样，1000 张合成截图的错误数也一样。
@@ -160,7 +173,7 @@ Python 里用 `OnnxEmbedder(path, threads=4, batch_size=8)`。`batch_size` 是�
 | `gallery-int8.tar.gz` + `embedder-int8.onnx` | int8 量化模型（约 24 MB）和用它建的底库 |
 | `gallery-fp32.tar.gz` + `embedder-fp32.onnx` | 未量化模型（约 88 MB）和用它建的底库，结果与 PyTorch 完全一致 |
 
-**同一变体的底库和模型必须配套使用。** 选哪个变体：先用 `sekai-card-id bench` 在目标机器上分别测两个模型；int8 更快、更省内存，但在没有 VNNI 的 CPU 上收益可能很小，而且它的拒识余量更薄（见上面的 [ONNX](#onnx部署时不需要-torch)）。
+**同一变体的底库和模型必须配套使用。** 选哪个变体：先用 `sekai-card-id bench` 在目标机器上分别测两个模型；int8 更快、更省内存，但在没有 VNNI 的 CPU 上只快约 9%，而且它的拒识余量更薄（见上面的 [ONNX](#onnx部署时不需要-torch)）。
 
 ```bash
 base=https://github.com/Sekai-World/sekai-chara-thumbnail-phash/releases/download/gallery-latest
@@ -238,7 +251,7 @@ JP、EN、TW、KR、CN 用同一份底库，不需要按服务器另建。底库
 
 ## 下一步
 
-1. 在目标服务器上用 `sekai-card-id bench` 实测 int8 和 fp32，决定用哪个变体（int8 的加速在没有 VNNI 的 CPU 上没测过，见 [ONNX](#onnx部署时不需要-torch)）。
+1. 在目标服务器上用 `sekai-card-id bench` 实测 int8 和 fp32，决定用哪个变体（没有 VNNI 的 E5-1650 v4 上 int8 只快约 9%，见 [ONNX](#onnx部署时不需要-torch)）。
 2. 收集其他设备（平板、不同屏幕比例）、其他服务器（EN/TW/KR/CN，底库不用另建，见上，但界面是否和 JP 一样没确认过）以及滚到一半的真实截图，补充到 `tests/fixtures/screenshots/` 和 `labels.csv`。样本越多，拒识阈值越可靠；int8 的拒识余量更薄，更需要这些样本。
 3. 如果 int8 在目标机器上没有明显收益，或者想进一步提速：可以先用 tiny 特征（约 0.7 ms/张）预筛，只对把握不大的卡再跑 DINOv2。但 tiny 对定位偏差比较敏感（偏移 10% 时只有 68%），需要先有其他设备的样本再决定。
 4. 可选：识别 `Lv`、专精等级等信息，一起导入。
